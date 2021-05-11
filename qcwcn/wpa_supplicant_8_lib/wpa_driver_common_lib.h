@@ -30,6 +30,10 @@
 #ifndef WPA_DRIVER_COMMON_LIB
 #define WPA_DRIVER_COMMON_LIB
 
+typedef _Bool bool;
+#define true 1
+#define false 0
+
 #include "android_drv.h"
 #define OUI_LEN		3
 #define MAX_CMD_LEN	32
