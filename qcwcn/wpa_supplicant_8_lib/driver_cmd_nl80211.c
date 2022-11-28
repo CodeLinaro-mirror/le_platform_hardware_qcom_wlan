@@ -911,6 +911,34 @@ int wpa_driver_nl80211_driver_event(struct wpa_driver_nl80211_data *drv,
 	return ret;
 }
 
+int wpa_driver_nl80211_diag_msg_event(struct nl_msg *msg, void *ctx)
+{
+	int ret = -1, lib_n;
+
+	if (wpa_driver_oem_initialize(&oem_cb_table) == WPA_DRIVER_OEM_STATUS_FAILURE ||
+			!oem_cb_table)
+		return -1;
+
+	for (lib_n = 0;
+	     oem_cb_table[lib_n].wpa_driver_driver_cmd_oem_cb != NULL;
+	     lib_n++) {
+		if (oem_cb_table[lib_n].wpa_driver_nl80211_driver_oem_diag_event) {
+			ret = oem_cb_table[lib_n].wpa_driver_nl80211_driver_oem_diag_event(
+				msg, ctx);
+			if (ret == WPA_DRIVER_OEM_STATUS_SUCCESS ) {
+				break;
+			}  else if (ret == WPA_DRIVER_OEM_STATUS_ENOSUPP) {
+				continue;
+			}  else if (ret == WPA_DRIVER_OEM_STATUS_FAILURE) {
+				wpa_printf(MSG_DEBUG, "%s: Received error: %d",
+					__func__, ret);
+				break;
+			}
+		}
+	}
+	return ret;
+}
+
 static int finish_handler(struct nl_msg *msg, void *arg)
 {
 	int *ret = (int *)arg;
@@ -2639,10 +2667,6 @@ static int check_for_twt_cmd(char **cmd)
 static u64 get_u64_from_string(char *cmd_string, int *ret)
 {
 	u64 val = 0;
-	char *cmd = cmd_string;
-
-	while (*cmd != ' ')
-		cmd++;
 
 	*ret = 0;
 	errno = 0;
@@ -2658,10 +2682,6 @@ static u64 get_u64_from_string(char *cmd_string, int *ret)
 static u32 get_u32_from_string(char *cmd_string, int *ret)
 {
 	u32 val = 0;
-	char *cmd = cmd_string;
-
-	while (*cmd != ' ')
-		cmd++;
 
 	*ret = 0;
 	errno = 0;
@@ -2675,11 +2695,7 @@ static u32 get_u32_from_string(char *cmd_string, int *ret)
 
 static u8 get_u8_from_string(char *cmd_string, int *ret)
 {
-	char *cmd = cmd_string;
 	u8 val = 0;
-
-	while (*cmd != ' ')
-		cmd++;
 
 	*ret = 0;
 	errno = 0;
