@@ -20,6 +20,7 @@ library_include_HEADERS = $(h_sources)
 libcld80211_la_SOURCES = cld80211_lib.c
 libcld80211_la_CFLAGS = ${AM_CFLAGS} ${LIBNL_CFLAGS}
 libcld80211_la_LIBADD = ${LIBNL_LIBS}
+libcld80211_la_LDFLAGS = -version-number @LT_VERSION_NUMBER@ -shared $(DEBUG_LDFLAGS)
 lib_LTLIBRARIES = libcld80211.la
 
 pkgconfigdir = $(libdir)/pkgconfig
