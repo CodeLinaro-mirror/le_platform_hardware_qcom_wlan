@@ -182,6 +182,15 @@
 #define OPM_MODE_DISABLE         0
 #define OPM_MODE_ENABLE          1
 #define OPM_MODE_USER_DEFINED    2
+#define OPM_MODE_LATENCY_BASED   3
+
+#define HEXA_0X_STR             "0x"
+#define HEXA_0X_STR_LENGTH       2
+#define HEXA_DECIMAL             16
+#define CSI_MASK_STR_LENGTH      10
+#define MGMT_FRAME_VALUE_MAX     0x2FFF
+#define CTRL_FRAME_VALUE_MAX     0x8FFF
+#define DATA_FRAME_VALUE_MAX     0x8FFF
 
 static int twt_async_support = -1;
 
@@ -254,6 +263,15 @@ static struct csi_global_params g_csi_param = {0};
 
 static wpa_driver_oem_cb_table_t *oem_cb_table = NULL;
 
+/* === CSI Frame Mask  === */
+struct csi_frame_mask {
+	u32 management_mask;
+	u32 control_mask;
+	u32 data_mask;
+};
+
+struct csi_frame_mask global_frame_mask = {0};
+
 #define MCC_QUOTA_MIN 10
 #define MCC_QUOTA_MAX 90
 /* Only one quota entry for now */
@@ -263,7 +281,6 @@ struct mcc_quota {
        uint32_t if_idx;
        uint32_t quota;
 };
-
 
 char *get_next_arg(char *cmd)
 {
@@ -2341,7 +2358,7 @@ static int wpa_driver_send_get_scan_cmd(struct i802_bss *bss, int *status)
 }
 
 static int wpa_driver_start_csi_capture(struct i802_bss *bss, int *status,
-					int transport_mode)
+					int transport_mode, struct csi_frame_mask *frame_mask)
 {
 	struct wpa_driver_nl80211_data *drv = bss->drv;
 	struct nl_msg *nlmsg;
@@ -2412,10 +2429,36 @@ static int wpa_driver_start_csi_capture(struct i802_bss *bss, int *status,
 		return WPA_DRIVER_OEM_STATUS_FAILURE;
 	}
 
-	if (nla_put_u32(nlmsg, QCA_WLAN_VENDOR_ATTR_PEER_CFR_GROUP_MGMT_FILTER,
-			CSI_MGMT_BEACON)) {
-		nlmsg_free(nlmsg);
-		return WPA_DRIVER_OEM_STATUS_FAILURE;
+	/* When mask is not configured, use CSI_MGMT_BEACON as default mask */
+	if (frame_mask->management_mask == 0 &&
+	    frame_mask->control_mask == 0 &&
+	    frame_mask->data_mask == 0) {
+	    if (nla_put_u32(nlmsg, QCA_WLAN_VENDOR_ATTR_PEER_CFR_GROUP_MGMT_FILTER,
+				CSI_MGMT_BEACON)) {
+		    nlmsg_free(nlmsg);
+		    return WPA_DRIVER_OEM_STATUS_FAILURE;
+		}
+	} else {
+		if (nla_put_u32(nlmsg, QCA_WLAN_VENDOR_ATTR_PEER_CFR_GROUP_MGMT_FILTER,
+				frame_mask->management_mask)) {
+			wpa_printf(MSG_ERROR, "Failed to set management frame mask");
+			nlmsg_free(nlmsg);
+			return WPA_DRIVER_OEM_STATUS_FAILURE;
+		}
+
+		if (nla_put_u32(nlmsg, QCA_WLAN_VENDOR_ATTR_PEER_CFR_GROUP_CTRL_FILTER,
+				frame_mask->control_mask)) {
+			wpa_printf(MSG_ERROR, "Failed to set control frame mask");
+			nlmsg_free(nlmsg);
+			return WPA_DRIVER_OEM_STATUS_FAILURE;
+		}
+
+		if (nla_put_u32(nlmsg, QCA_WLAN_VENDOR_ATTR_PEER_CFR_GROUP_DATA_FILTER,
+				frame_mask->data_mask)) {
+			wpa_printf(MSG_ERROR, "Failed to set data frame mask");
+			nlmsg_free(nlmsg);
+			return WPA_DRIVER_OEM_STATUS_FAILURE;
+		}
 	}
 
 	if (nla_put(nlmsg, QCA_WLAN_VENDOR_ATTR_PEER_CFR_GROUP_TA,
@@ -2494,6 +2537,29 @@ static void stop_csi_callback(int nsec)
 		wpa_printf(MSG_ERROR, "Stop CSI failed");
 }
 
+static u32 get_frame_mask(char *cmd_string, int *ret)
+{
+	long value = 0;
+	char *endptr = NULL;
+
+	*ret = 0;
+	if (cmd_string) {
+		cmd_string += CSI_MASK_STR_LENGTH;
+		if (os_strncasecmp(cmd_string, HEXA_0X_STR, HEXA_0X_STR_LENGTH) != 0) {
+			wpa_printf(MSG_ERROR, "Mask value not in correct format or not present");
+			*ret = -EINVAL;
+			return (u32)value;
+		}
+		cmd_string += HEXA_0X_STR_LENGTH;
+		value = strtoul(cmd_string, &endptr, HEXA_DECIMAL);
+		if (*cmd_string == *endptr || value < 0) {
+			wpa_printf(MSG_ERROR, "Invalid Mask");
+			*ret = -EINVAL;
+		}
+	}
+	return (u32)value;
+}
+
 static int wpa_driver_handle_csi_cmd(struct i802_bss *bss, char *cmd,
 				     char *buf, size_t buf_len,
 				     int *status)
@@ -2501,12 +2567,76 @@ static int wpa_driver_handle_csi_cmd(struct i802_bss *bss, char *cmd,
 	int csi_duration = -1;
 	int transport_mode = -1;
 	char *next_arg;
+	bool duration_str_present = false;
+	memset(&global_frame_mask, 0, sizeof(struct csi_frame_mask));
+	int ret = 0;
 
 	cmd = skip_white_space(cmd);
 	wpa_printf(MSG_DEBUG, "cmd:%s", cmd);
 	if (os_strncasecmp(cmd, "start", 5) == 0) {
-		next_arg = get_next_arg(cmd);
-		csi_duration = atoi(next_arg);
+		char *traverse = cmd;
+		while (traverse && *traverse != '\0') {
+			if (os_strncasecmp(traverse, "Duration=", 9) == 0) {
+				duration_str_present = true;
+				traverse += 9;
+				if (*traverse != '\0' && *traverse != ' ')
+					csi_duration = atoi(traverse);
+			}
+
+			if (os_strncasecmp(traverse, "TransportMode=", 14) == 0) {
+				traverse += 14;
+				if (*traverse != '\0' && *traverse != ' ')
+					transport_mode = atoi(traverse);
+			}
+			/* Parsing of management, control and data frame mask*/
+			if (os_strncasecmp(traverse, "MGMT_MASK=", CSI_MASK_STR_LENGTH) == 0) {
+				global_frame_mask.management_mask = get_frame_mask(traverse, &ret);
+				if (ret < 0)
+					return WPA_DRIVER_OEM_STATUS_FAILURE;
+
+				wpa_printf(MSG_DEBUG, "CSI:Management Frame Mask:%u", global_frame_mask.management_mask);
+				global_frame_mask.management_mask &= MGMT_FRAME_VALUE_MAX;
+			}
+
+			if (os_strncasecmp(traverse, "DATA_MASK=", CSI_MASK_STR_LENGTH) == 0) {
+				global_frame_mask.data_mask = get_frame_mask(traverse, &ret);
+				if (ret < 0)
+					return WPA_DRIVER_OEM_STATUS_FAILURE;
+
+				wpa_printf(MSG_DEBUG, "CSI:Data Frame Mask:%u", global_frame_mask.data_mask);
+				global_frame_mask.data_mask &= DATA_FRAME_VALUE_MAX;
+			}
+
+			if (os_strncasecmp(traverse, "CTRL_MASK=", CSI_MASK_STR_LENGTH) == 0) {
+				global_frame_mask.control_mask = get_frame_mask(traverse, &ret);
+				if (ret < 0)
+					return WPA_DRIVER_OEM_STATUS_FAILURE;
+
+				wpa_printf(MSG_DEBUG, "CSI:Control Frame Mask:%u", global_frame_mask.control_mask);
+				global_frame_mask.control_mask &= CTRL_FRAME_VALUE_MAX;
+			}
+
+			traverse = get_next_arg(traverse);
+			traverse = skip_white_space(traverse);
+		}
+
+		/* This if condition maintains the legacy behavior */
+		/* when no duration or transport mode string is passed*/
+		if (duration_str_present == false) {
+			next_arg = get_next_arg(cmd);
+			csi_duration = atoi(next_arg);
+			cmd += 6;
+			next_arg = get_next_arg(cmd);
+			if (*next_arg != '\0' && *next_arg == ' ')
+				transport_mode = atoi(next_arg);
+		}
+
+		if (transport_mode == -1)
+			transport_mode = 1;
+		g_csi_param.transport_mode = transport_mode;
+
+		wpa_printf(MSG_DEBUG, "CSI:Duration Value = %d", csi_duration);
+		wpa_printf(MSG_DEBUG, "CSI:Transport Mode Value= %d", transport_mode);
 
 		if (csi_duration < 0) {
 			wpa_printf(MSG_ERROR, "Invalid duration");
@@ -2529,16 +2659,9 @@ static int wpa_driver_handle_csi_cmd(struct i802_bss *bss, char *cmd,
 		}
 
 		g_csi_param.bss = bss;
-		cmd += 6;
-		next_arg = get_next_arg(cmd);
-		if (*next_arg != '\0' && *next_arg == ' ')
-			transport_mode = atoi(next_arg);
-
-		if (transport_mode == 1 || transport_mode == -1)
-			transport_mode = 1;
 		g_csi_param.transport_mode = transport_mode;
 
-		wpa_driver_start_csi_capture(bss, status, transport_mode);
+		wpa_driver_start_csi_capture(bss, status, transport_mode, &global_frame_mask);
 		if (*status == 0 && csi_duration > 0) {
 			signal(SIGALRM, stop_csi_callback);
 			alarm(csi_duration);
@@ -2574,7 +2697,7 @@ static int wpa_driver_restart_csi(struct i802_bss *bss, int *status)
 	}
 	g_csi_param.bss = bss;
 	if(wpa_driver_start_csi_capture(g_csi_param.bss, status,
-				g_csi_param.transport_mode)) {
+				g_csi_param.transport_mode, &global_frame_mask)) {
 		*status = CSI_STATUS_REJECTED;
 		return WPA_DRIVER_OEM_STATUS_FAILURE;
 	}
@@ -6408,6 +6531,8 @@ static uint8_t wpa_driver_convert_opm_mode(uint8_t opm_mode)
 		return QCA_WLAN_VENDOR_OPM_MODE_ENABLE;
 	case 2:
 		return QCA_WLAN_VENDOR_OPM_MODE_USER_DEFINED;
+	case 3:
+		return QCA_WLAN_VENDOR_OPM_MODE_LATENCY_BASED;
 	default:
 		return opm_mode;
 	}
@@ -6418,8 +6543,8 @@ static int wpa_driver_ps_config_cmd(struct i802_bss *bss, char *cmd)
 	struct wpa_driver_nl80211_data *drv;
 	struct nl_msg *nlmsg;
 	struct nlattr *attr;
-	u8 opm_mode;
-	u16 ps_ito, spec_wake;
+	u8 opm_mode, ps_opm_level;
+	u16 ps_ito, spec_wake, latency_tolerance;
 	int ret;
 
 	drv = bss->drv;
@@ -6431,6 +6556,11 @@ static int wpa_driver_ps_config_cmd(struct i802_bss *bss, char *cmd)
 	opm_mode = get_u8_from_string(cmd, &ret);
 	if (ret < 0) {
 		wpa_printf(MSG_ERROR, "ps_config: Invalid opm_mode");
+		return -EINVAL;
+	}
+	if (opm_mode > 3) {
+		wpa_printf(MSG_ERROR,
+			   "opm_mode must be within the range of 0 to 3");
 		return -EINVAL;
 	}
 
@@ -6454,6 +6584,40 @@ static int wpa_driver_ps_config_cmd(struct i802_bss *bss, char *cmd)
 		spec_wake = get_u16_from_string(cmd, &ret);
 		if (ret < 0) {
 			wpa_printf(MSG_ERROR, "Invalid spec_wake value");
+			return -EINVAL;
+		}
+	}
+
+	if (opm_mode == OPM_MODE_LATENCY_BASED) {
+		cmd = move_to_next_str(cmd);
+		if (*cmd == '\0') {
+			wpa_printf(MSG_ERROR, "ps_opm_level is missing in cmd");
+			return -EINVAL;
+		}
+		ps_opm_level = get_u8_from_string(cmd, &ret);
+		if (ret < 0) {
+			wpa_printf(MSG_ERROR, "Invalid ps_opm_level value");
+			return -EINVAL;
+		}
+		if ((ps_opm_level == 0) || (ps_opm_level > 5)) {
+			wpa_printf(MSG_ERROR,
+				   "Values of ps_opm_level above 5 & 0 are not supported");
+			return -EINVAL;
+		}
+		cmd = move_to_next_str(cmd);
+		if (*cmd == '\0') {
+			wpa_printf(MSG_ERROR,
+				   "latency_tolerance is missing in cmd");
+			return -EINVAL;
+		}
+		latency_tolerance = get_u16_from_string(cmd, &ret);
+		if (ret < 0) {
+			wpa_printf(MSG_ERROR, "Invalid latency_tolerance value");
+			return -EINVAL;
+		}
+		if ((latency_tolerance > 200) || (latency_tolerance < 30)) {
+			wpa_printf(MSG_ERROR,
+				   "latency_tolerance must be within the range of 30 to 200");
 			return -EINVAL;
 		}
 	}
@@ -6492,6 +6656,22 @@ static int wpa_driver_ps_config_cmd(struct i802_bss *bss, char *cmd)
 				spec_wake)) {
 			ret = -ENOMEM;
 			wpa_printf(MSG_ERROR, "Failed to put spec_wake value");
+			goto nlmsg_fail;
+		}
+	}
+
+	if (opm_mode == OPM_MODE_LATENCY_BASED) {
+		if (nla_put_u8(nlmsg, QCA_WLAN_VENDOR_ATTR_CONFIG_OPM_LEVEL,
+				ps_opm_level)) {
+			ret = -ENOMEM;
+			wpa_printf(MSG_ERROR, "Failed to put ps_opm level value");
+			goto nlmsg_fail;
+		}
+		if (nla_put_u16(nlmsg,
+				QCA_WLAN_VENDOR_ATTR_CONFIG_OPM_LATENCY_TOLERANCE,
+				latency_tolerance)) {
+			ret = -ENOMEM;
+			wpa_printf(MSG_ERROR, "Failed to put latency tolerance value");
 			goto nlmsg_fail;
 		}
 	}
@@ -6916,13 +7096,16 @@ int wpa_driver_nl80211_driver_cmd(void *priv, char *cmd, char *buf,
 		cmd += 17;
 		return wpa_driver_set_ul_mu_cfg(bss, cmd);
 	} else if (os_strncasecmp(cmd, "SET_PS_CONFIG ", 14) == 0) {
-		/* DRIVER SET_PS_CONFIG <opm_mode> <ps_ito> <spec_wake>
+		/* DRIVER SET_PS_CONFIG <opm_mode> <val1> <val2>
 		 * opm_mode  - Optimized power management Mode
-		 *     value 0 - Disable OPM
-		 *     value 1 - Enable OPM
-		 *     value 2 - User defined OPM
-		 * ps_ito    - Power save inactivity timeout
-		 * spec_wake - Speculative wake interval
+		 *   value 0 - Disable OPM (no power management)
+		 *   value 1 - Enable OPM (default power management)
+		 *   value 2 - User defined OPM
+		 *      val1 - Power save inactivity timeout (in ms)
+		 *      val2 - Speculative wake interval (in ms)
+		 *   value 3 - Latency based OPM
+		 *      val1 - Aggressiveness level (1-5, where 1 is most aggressive)
+		 *      val2 - Latency tolerance (30-200 ms)
 		 */
 		cmd += 14;
 		return wpa_driver_ps_config_cmd(bss, cmd);
