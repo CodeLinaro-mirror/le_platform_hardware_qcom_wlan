@@ -40,7 +40,7 @@
 #include "nl80211_copy.h"
 #include <ctype.h>
 
-#include "wifi_hal.h"
+#include <hardware_legacy/wifi_hal.h>
 #include "common.h"
 #include "cpp_bindings.h"
 #include "vendor_definitions.h"
@@ -599,7 +599,15 @@ wifi_error WifiCommand::requestResponse()
 
 wifi_error WifiCommand::requestResponse(WifiRequest& request)
 {
+    int err = requestResponseWithKernelStatus(request);
+    return mapKernelErrortoWifiHalError(err);
+}
+
+int WifiCommand::requestResponseWithKernelStatus(WifiRequest& request)
+{
     int err = 0;
+
+    pthread_mutex_lock(&mInfo->cb_lock);
 
     struct nl_cb *cb = nl_cb_alloc(NL_CB_DEFAULT);
     if (!cb)
@@ -626,7 +634,8 @@ wifi_error WifiCommand::requestResponse(WifiRequest& request)
 out:
     nl_cb_put(cb);
     mMsg.destroy();
-    return mapKernelErrortoWifiHalError(err);
+    pthread_mutex_unlock(&mInfo->cb_lock);
+    return err;
 }
 
 wifi_error WifiCommand::requestEvent(int cmd)

@@ -51,7 +51,7 @@
 #include "sync.h"
 #include <utils/Log.h>
 #include <errno.h>
-#include "wifi_hal.h"
+#include <hardware_legacy/wifi_hal.h>
 #include "nan_i.h"
 #include "nancommand.h"
 #include <errno.h>
@@ -123,9 +123,23 @@ int NanCommand::handleNanIndication()
          * framework has disabled the self MAC address indication.
          */
         if (!res &&
+            ((discEngEventInd.event_type == NAN_EVENT_ID_STARTED_CLUSTER) ||
+            (discEngEventInd.event_type == NAN_EVENT_ID_JOINED_CLUSTER))) {
+            mNanCommandInstance->saveClusterAddr(discEngEventInd.data.cluster.addr);
+            if (discEngEventInd.event_type == NAN_EVENT_ID_STARTED_CLUSTER &&
+                (mNanCommandInstance->mConfigDiscoveryIndications &
+                 NAN_STARTED_CLUSTER_IND_DISABLED))
+                break;
+            if (discEngEventInd.event_type == NAN_EVENT_ID_JOINED_CLUSTER &&
+                (mNanCommandInstance->mConfigDiscoveryIndications &
+                 NAN_JOINED_CLUSTER_IND_DISABLED))
+                break;
+        }
+        if (!res &&
             (discEngEventInd.event_type == NAN_EVENT_ID_DISC_MAC_ADDR)) {
             mNanCommandInstance->saveNmi(discEngEventInd.data.mac_addr.addr);
-            if (mNanCommandInstance->mNanDiscAddrIndDisabled)
+            if (mNanCommandInstance->mConfigDiscoveryIndications &
+                NAN_DISC_ADDR_IND_DISABLED)
                 break;
         }
         if (!res && mHandler.EventDiscEngEvent) {
@@ -135,7 +149,17 @@ int NanCommand::handleNanIndication()
 
     case NAN_INDICATION_FOLLOWUP:
         NanFollowupInd followupInd;
+
         memset(&followupInd, 0, sizeof(followupInd));
+
+        res = handleNanBootstrappingIndication();
+        if (res)
+           ALOGE("handleNanBootstrappingInd Failed, ret = %d", res);
+
+        res = handleNanSharedKeyDescIndication();
+        if (res)
+           ALOGE("handleNanSharedKeyDescInd Failed, ret = %d", res);
+
         res = getNanFollowup(&followupInd);
         if (!res && mHandler.EventFollowup) {
             (*mHandler.EventFollowup)(&followupInd);
@@ -195,7 +219,16 @@ int NanCommand::handleNanIndication()
             (*mHandler.EventRangeReport)(&rangeReportInd);
         }
         break;
-
+#ifdef CONFIG_NAN_VENDOR_AIDL
+    case NAN_INDICATION_VENDOR_EVENT:
+        NanVendorEventInd EventInd;
+        memset(&EventInd, 0, sizeof(EventInd));
+        res = getNanVendorEventInd(&EventInd);
+        if (!res && mVendorHandler.VendorEventIndication) {
+            (*mVendorHandler.VendorEventIndication)(&EventInd);
+        }
+        break;
+#endif
     default:
         ALOGE("handleNanIndication error invalid msg_id:%u", msg_id);
         res = (int)WIFI_ERROR_INVALID_REQUEST_ID;
@@ -243,6 +276,10 @@ NanIndicationType NanCommand::getIndicationType()
         return NAN_INDICATION_RANGING_REQUEST_RECEIVED;
     case NAN_MSG_ID_RANGING_RESULT_IND:
         return NAN_INDICATION_RANGING_RESULT;
+    case NAN_MSG_ID_IDENTITY_RESOLUTION_IND:
+        return NAN_INDICATION_IDENTITY_RESOLUTION;
+    case NAN_MSG_ID_OEM_IND:
+        return NAN_INDICATION_VENDOR_EVENT;
     default:
         return NAN_INDICATION_UNKNOWN;
     }
@@ -264,7 +301,7 @@ int NanCommand::getNanPublishReplied(NanPublishRepliedInd *event)
     NanTlv outputTlv;
     u16 readLen = 0;
     int remainingLen = (mNanDataLen - \
-        (sizeof(NanMsgHeader)));
+        (sizeof(NanMsgHeader) + sizeof(NanPublishRepliedIndParams)));
 
     if (remainingLen <= 0) {
         ALOGI("%s: No TLV's present",__func__);
@@ -425,6 +462,7 @@ int NanCommand::getNanMatch(NanMatchInd *event)
             event->cluster_attribute_len = outputTlv.length;
             break;
         case NAN_TLV_TYPE_NAN_CSID:
+        case NAN_TLV_TYPE_NAN_CSID_EXT:
             if (outputTlv.length > sizeof(event->peer_cipher_type)) {
                 outputTlv.length = sizeof(event->peer_cipher_type);
             }
@@ -454,6 +492,28 @@ int NanCommand::getNanMatch(NanMatchInd *event)
             }
             memcpy(&event->range_info, outputTlv.value, outputTlv.length);
             break;
+        case NAN_TLV_TYPE_PAIRING_MATCH_PARAMS:
+            if (outputTlv.length != sizeof(NanFWPairingParamsMatch)) {
+                ALOGE("NAN_TLV_TYPE_PAIRING_MATCH_PARAMS"
+                      "Incorrect size:%d expecting %zu", outputTlv.length,
+                      sizeof(NanFWPairingParamsMatch));
+                break;
+            }
+            getNanReceivePairingParamsMatch(outputTlv.value,
+                                             &event->peer_pairing_config);
+            break;
+        case NAN_TLV_TYPE_NIRA_NONCE:
+            if (outputTlv.length > sizeof(event->nira.nonce))
+                outputTlv.length = sizeof(event->nira.nonce);
+            memcpy(event->nira.nonce, outputTlv.value, outputTlv.length);
+            event->peer_pairing_config.enable_pairing_verification = 1;
+            break;
+        case NAN_TLV_TYPE_NIRA_TAG:
+            if (outputTlv.length > sizeof(event->nira.tag))
+                outputTlv.length = sizeof(event->nira.tag);
+            memcpy(event->nira.tag, outputTlv.value, outputTlv.length);
+            event->peer_pairing_config.enable_pairing_verification = 1;
+            break;
         case NAN_TLV_TYPE_SDEA_SERVICE_SPECIFIC_INFO:
             if (outputTlv.length > NAN_MAX_SDEA_SERVICE_SPECIFIC_INFO_LEN) {
                 outputTlv.length = NAN_MAX_SDEA_SERVICE_SPECIFIC_INFO_LEN;
@@ -466,7 +526,8 @@ int NanCommand::getNanMatch(NanMatchInd *event)
             mNanCommandInstance->saveServiceId(outputTlv.value,
                                                event->publish_subscribe_id,
                                                event->requestor_instance_id,
-                                               NAN_ROLE_SUBSCRIBER);
+                                               NAN_ROLE_SUBSCRIBER,
+                                               event->addr);
             break;
         default:
             ALOGV("Unknown TLV type skipped");
@@ -508,8 +569,316 @@ int NanCommand::getNanSubscribeTerminated(NanSubscribeTerminatedInd *event)
     return WIFI_SUCCESS;
 }
 
+int NanCommand::handleNanBootstrappingIndication()
+{
+    u8 mac[NAN_MAC_ADDR_LEN];
+    int retval = WIFI_SUCCESS;
+    NanFWBootstrappingParams *params = NULL;
+
+    if (mNanVendorEvent == NULL) {
+        ALOGE("%s: Invalid mNanVendorEvent:%p",
+              __func__, mNanVendorEvent);
+        return WIFI_ERROR_INVALID_ARGS;
+    }
+
+    pNanFollowupIndMsg pRsp = (pNanFollowupIndMsg)mNanVendorEvent;
+    u8 *pInputTlv = pRsp->ptlv;
+    NanTlv outputTlv;
+    u16 readLen = 0;
+    u32 cookie_length = 0;
+    u8 *cookie = NULL;
+    int remainingLen = (mNanDataLen -  \
+        (sizeof(NanMsgHeader) + sizeof(NanFollowupIndParams)));
+
+    if (remainingLen <= 0) {
+        ALOGV("%s: No TLV's present",__func__);
+        return WIFI_ERROR_INVALID_ARGS;
+    }
+    ALOGV("%s: TLV remaining Len:%d",__func__, remainingLen);
+    memset(mac, 0, sizeof(mac));
+    while (remainingLen > 0) {
+        memset(&outputTlv, 0, sizeof(outputTlv));
+        readLen = NANTLV_ReadTlv(pInputTlv, &outputTlv, remainingLen);
+        if (!readLen)
+            break;
+
+        ALOGV("%s: Remaining Len:%d readLen:%d type:%d length:%d",
+              __func__, remainingLen, readLen, outputTlv.type,
+              outputTlv.length);
+        switch (outputTlv.type) {
+        case NAN_TLV_TYPE_MAC_ADDRESS:
+            if (outputTlv.length > sizeof(mac)) {
+                outputTlv.length = sizeof(mac);
+            }
+            memcpy(mac, outputTlv.value, outputTlv.length);
+            break;
+        case NAN_TLV_TYPE_BOOTSTRAPPING_PARAMS:
+            if (outputTlv.length != sizeof(NanFWBootstrappingParams)) {
+                ALOGE("NAN Bootstrapping Params"
+                      "Incorrect size:%d expecting %zu", outputTlv.length,
+                      sizeof(NanFWBootstrappingParams));
+                break;
+            }
+            params = (NanFWBootstrappingParams *)outputTlv.value;
+            break;
+        case NAN_TLV_TYPE_BOOTSTRAPPING_COOKIE:
+            ALOGV("Bootstrapping cookie received. len =%d", outputTlv.length);
+            cookie_length = outputTlv.length;
+            cookie = outputTlv.value;
+            break;
+        default:
+            ALOGV("Unknown TLV type skipped");
+            break;
+        }
+        remainingLen -= readLen;
+        pInputTlv += readLen;
+    }
+
+    if (params)
+    {
+       hal_info *info = getHalInfo(wifiHandle());
+       struct nan_pairing_peer_info *entry = NULL;
+       if (!info) {
+           ALOGE("%s: hal info NULL", __FUNCTION__);
+           return WIFI_ERROR_UNKNOWN;
+       }
+       if (!info->secure_nan) {
+           ALOGE("%s: Secure NAN not supported", __FUNCTION__);
+           return WIFI_ERROR_UNKNOWN;
+       }
+       if (params->type == NAN_BS_TYPE_REQUEST) {
+           NanBootstrappingRequestInd bootstrapReqInd;
+
+           entry = nan_pairing_get_peer_from_list(info->secure_nan, mac);
+           if (entry && entry->is_pairing_in_progress) {
+               ALOGV("%s: pairing in progress", __FUNCTION__);
+               return WIFI_ERROR_UNKNOWN;
+           }
+
+           memset(&bootstrapReqInd, 0, sizeof(bootstrapReqInd));
+           bootstrapReqInd.publish_subscribe_id = pRsp->fwHeader.handle;
+           info->secure_nan->bootstrapping_id++;
+           bootstrapReqInd.bootstrapping_instance_id =
+                                         info->secure_nan->bootstrapping_id;
+           bootstrapReqInd.requestor_instance_id =
+                                         pRsp->followupIndParams.matchHandle;
+           memcpy(bootstrapReqInd.peer_disc_mac_addr, mac, NAN_MAC_ADDR_LEN);
+           bootstrapReqInd.request_bootstrapping_method =
+             get_matching_bootstrap_method(params->bootstrapping_method_bitmap);
+           entry = nan_pairing_add_peer_to_list(info->secure_nan, mac);
+           if (entry) {
+               entry->requestor_instance_id = bootstrapReqInd.requestor_instance_id;
+               entry->pub_sub_id = bootstrapReqInd.publish_subscribe_id;
+               entry->bootstrapping_instance_id =
+                                      bootstrapReqInd.bootstrapping_instance_id;
+               entry->peer_role = SECURE_NAN_BOOTSTRAPPING_INITIATOR;
+               entry->peer_supported_bootstrap =
+                                      params->bootstrapping_method_bitmap;
+               entry->dialog_token = params->dialog_token;
+           }
+           handleNanBootstrappingReqInd(&bootstrapReqInd);
+       } else if (params->type == NAN_BS_TYPE_RESPONSE) {
+           entry = nan_pairing_get_peer_from_list(info->secure_nan, mac);
+           if (entry == NULL) {
+               ALOGE("%s: peer not found: ADDR=" MACSTR, __FUNCTION__, MAC2STR(mac));
+               return WIFI_ERROR_UNKNOWN;
+           }
+
+           if (entry->dialog_token != params->dialog_token) {
+               ALOGE("Dialog token not matching. Req token: %d, Rsp token: %d",
+                      entry->dialog_token, params->dialog_token);
+#ifdef CONFIG_NAN_STRICT_MODE
+               return WIFI_ERROR_UNKNOWN;
+#endif /* CONFIG_NAN_STRICT_MODE */
+           }
+
+           NanBootstrappingConfirmInd *bootstrapConfirmInd =
+             (NanBootstrappingConfirmInd *)malloc(sizeof(NanBootstrappingConfirmInd)
+                                                  + cookie_length);
+           if (!bootstrapConfirmInd) {
+               ALOGE("%s: Memory allocation Failed", __FUNCTION__);
+               return WIFI_ERROR_OUT_OF_MEMORY;
+           }
+           memset(bootstrapConfirmInd, 0, sizeof(NanBootstrappingConfirmInd) +
+                                          cookie_length);
+           bootstrapConfirmInd->bootstrapping_instance_id =
+                                  entry->bootstrapping_instance_id;
+           if(params->status == NAN_BS_STATUS_ACCEPT)
+              bootstrapConfirmInd->rsp_code = NAN_BOOTSTRAPPING_REQUEST_ACCEPT;
+           else if (params->status == NAN_BS_STATUS_REJECT)
+              bootstrapConfirmInd->rsp_code = NAN_BOOTSTRAPPING_REQUEST_REJECT;
+           else if (params->status == NAN_BS_STATUS_COMEBACK)
+              bootstrapConfirmInd->rsp_code = NAN_BOOTSTRAPPING_REQUEST_COMEBACK;
+
+           bootstrapConfirmInd->reason_code =
+                                          (NanStatusType)params->reason_code;
+           bootstrapConfirmInd->come_back_delay =
+                                          params->comeback_after;
+           bootstrapConfirmInd->cookie_length = cookie_length;
+           if (cookie_length)
+               memcpy(bootstrapConfirmInd->cookie, cookie, cookie_length);
+
+           handleNanBootstrappingConfirm(bootstrapConfirmInd);
+       } else {
+            ALOGV("Bootstrapping msg type Invalid, type=%d", params->type);
+            retval = WIFI_ERROR_INVALID_ARGS;
+       }
+    }
+    return retval;
+}
+
+int NanCommand::handleNanSharedKeyDescIndication()
+{
+    u8 mac[NAN_MAC_ADDR_LEN];
+    int retval = WIFI_SUCCESS;
+    u16 shared_key_attr_len = 0;
+    u8 shared_key_attr[NAN_MAX_SHARED_KEY_ATTR_LEN];
+    wifi_interface_handle ifaceHandle;
+
+    if (mNanVendorEvent == NULL) {
+        ALOGE("%s: Invalid mNanVendorEvent:%p",
+              __func__, mNanVendorEvent);
+        return WIFI_ERROR_INVALID_ARGS;
+    }
+
+    pNanFollowupIndMsg pRsp = (pNanFollowupIndMsg)mNanVendorEvent;
+    u8 *pInputTlv = pRsp->ptlv;
+    NanTlv outputTlv;
+    u16 readLen = 0;
+    int remainingLen = (mNanDataLen -  \
+        (sizeof(NanMsgHeader) + sizeof(NanFollowupIndParams)));
+
+    if (remainingLen <= 0) {
+        ALOGV("%s: No TLV's present",__func__);
+        return WIFI_ERROR_INVALID_ARGS;
+    }
+    ALOGV("%s: TLV remaining Len:%d",__func__, remainingLen);
+    memset(mac, 0, sizeof(mac));
+    while (remainingLen > 0) {
+        memset(&outputTlv, 0, sizeof(outputTlv));
+        readLen = NANTLV_ReadTlv(pInputTlv, &outputTlv, remainingLen);
+        if (!readLen)
+            break;
+
+        ALOGV("%s: Remaining Len:%d readLen:%d type:%d length:%d",
+              __func__, remainingLen, readLen, outputTlv.type,
+              outputTlv.length);
+        switch (outputTlv.type) {
+        case NAN_TLV_TYPE_MAC_ADDRESS:
+            if (outputTlv.length > sizeof(mac)) {
+                outputTlv.length = sizeof(mac);
+            }
+            memcpy(mac, outputTlv.value, outputTlv.length);
+            break;
+        case NAN_TLV_TYPE_NAN_SHARED_KEY_DESC_ATTR:
+            if (outputTlv.length > NAN_MAX_SHARED_KEY_ATTR_LEN) {
+                outputTlv.length = NAN_MAX_SHARED_KEY_ATTR_LEN;
+            }
+            shared_key_attr_len = outputTlv.length;
+            memcpy(shared_key_attr, outputTlv.value,
+                   outputTlv.length);
+            break;
+        default:
+            ALOGV("Unknown TLV type skipped");
+            break;
+        }
+        remainingLen -= readLen;
+        pInputTlv += readLen;
+    }
+#ifdef WPA_PASN_LIB
+    if (!shared_key_attr_len)
+        return retval;
+
+    NanPairingConfirmInd evt;
+    struct pasn_data *pasn;
+    struct nan_pairing_peer_info *entry;
+    hal_info *info = getHalInfo(wifiHandle());
+    if (!info) {
+        ALOGE("%s: hal info NULL", __FUNCTION__);
+        return WIFI_ERROR_INVALID_ARGS;
+    }
+    if (!info->secure_nan) {
+        ALOGE("%s: Secure NAN not supported", __FUNCTION__);
+        return WIFI_ERROR_INVALID_ARGS;
+    }
+    ifaceHandle = wifi_get_iface_handle(wifiHandle(),
+                                        info->secure_nan->iface_name);
+    if (!ifaceHandle) {
+        ALOGE("%s: ifaceHandle NULL for %s", __FUNCTION__,
+              info->secure_nan->iface_name);
+        return WIFI_ERROR_INVALID_ARGS;
+    }
+    if (nan_validate_shared_key_desc(ifaceHandle, mac, shared_key_attr,
+                                     shared_key_attr_len)) {
+         ALOGV("Pairing handshake Invalid");
+         return WIFI_ERROR_INVALID_ARGS;
+    }
+
+    entry = nan_pairing_get_peer_from_list(info->secure_nan, mac);
+    if (!entry) {
+        ALOGE("%s NAN Pairing: peer not found", __FUNCTION__);
+        return retval;
+    }
+
+    if (entry->peer_role == SECURE_NAN_PAIRING_INITIATOR) {
+        info->secure_nan->pending_peer = entry;
+        nan_pairing_prepare_skda_data(ifaceHandle);
+    }
+
+    pasn = entry->pasn;
+
+    if (entry->is_paired) {
+        wpa_pasn_reset(pasn);
+        entry->is_pairing_in_progress = false;
+        return retval;
+    }
+
+    evt.pairing_instance_id = entry->pairing_instance_id;
+    evt.rsp_code = NAN_PAIRING_REQUEST_ACCEPT;
+    evt.reason_code = NAN_STATUS_SUCCESS;
+    evt.nan_pairing_request_type = NAN_PAIRING_SETUP;
+
+    evt.enable_pairing_cache = !!(entry->dcea_cap_info & DCEA_NPK_CACHING_ENABLED);
+
+    if (pasn_get_akmp(pasn) == WPA_KEY_MGMT_PASN)
+        evt.npk_security_association.akm = PASN;
+    else
+        evt.npk_security_association.akm = SAE;
+
+    if (pasn_get_cipher(pasn) == WPA_CIPHER_CCMP_256)
+        evt.npk_security_association.cipher_type = NAN_CIPHER_SUITE_PUBLIC_KEY_PASN_256_MASK;
+    else
+        evt.npk_security_association.cipher_type = NAN_CIPHER_SUITE_PUBLIC_KEY_PASN_128_MASK;
+
+    if (info->secure_nan->dev_nik)
+        memcpy(evt.npk_security_association.local_nan_identity_key,
+               info->secure_nan->dev_nik->nik_data, NAN_IDENTITY_KEY_LEN);
+
+    memcpy(evt.npk_security_association.peer_nan_identity_key,
+           entry->peer_nik, NAN_IDENTITY_KEY_LEN);
+
+    nan_pairing_remove_peers_with_nik(info, entry->peer_nik, entry->bssid);
+
+    if (pasn_get_pmk_len(pasn) <= sizeof(evt.npk_security_association.npk.pmk)) {
+        memcpy(evt.npk_security_association.npk.pmk, pasn_get_pmk(pasn),
+               pasn_get_pmk_len(pasn));
+        evt.npk_security_association.npk.pmk_len = pasn_get_pmk_len(pasn);
+    } else {
+        ALOGE("%s: Invalid pmk len: %zu", __FUNCTION__, pasn_get_pmk_len(pasn));
+    }
+    wpa_pasn_reset(pasn);
+    handleNanPairingConfirm(&evt);
+    entry->is_paired = true;
+    entry->is_pairing_in_progress = false;
+#endif
+    return retval;
+}
+
 int NanCommand::getNanFollowup(NanFollowupInd *event)
 {
+    struct nan_pairing_peer_info *entry;
+    hal_info *info = getHalInfo(wifiHandle());
+
     if (event == NULL || mNanVendorEvent == NULL) {
         ALOGE("%s: Invalid input argument event:%p mNanVendorEvent:%p",
               __func__, event, mNanVendorEvent);
@@ -570,6 +939,31 @@ int NanCommand::getNanFollowup(NanFollowupInd *event)
         pInputTlv += readLen;
         memset(&outputTlv, 0, sizeof(outputTlv));
     }
+
+    if (info && info->secure_nan) {
+        entry = nan_pairing_get_peer_from_list(info->secure_nan, event->addr);
+        if (entry) {
+            if (event->publish_subscribe_id &&
+                entry->pub_sub_id != event->publish_subscribe_id) {
+                ALOGI("Update previous pub sub id: %d with new id: %d",
+                      entry->pub_sub_id, event->publish_subscribe_id);
+                entry->pub_sub_id = event->publish_subscribe_id;
+            }
+            if (event->requestor_instance_id &&
+                entry->requestor_instance_id != event->requestor_instance_id) {
+                ALOGI("Update previous requestor instance id: %d with new id: %d",
+                      entry->requestor_instance_id, event->requestor_instance_id);
+                entry->requestor_instance_id = event->requestor_instance_id;
+            }
+        } else {
+            entry = nan_pairing_add_peer_to_list(info->secure_nan, event->addr);
+            if (entry) {
+                entry->pub_sub_id = event->publish_subscribe_id;
+                entry->requestor_instance_id = event->requestor_instance_id;
+            }
+        }
+    }
+
     return WIFI_SUCCESS;
 }
 
@@ -824,6 +1218,21 @@ void NanCommand::getNanReceiveSdeaCtrlParams(const u8* pInValue,
                          (NanRangingLimitState)((pInValue[0] & BIT_8) ?
                           NAN_RANGING_LIMIT_ENABLE : NAN_RANGING_LIMIT_DISABLE);
 #endif
+    }
+    return;
+}
+
+void NanCommand::getNanReceivePairingParamsMatch(const u8* pInValue,
+                                          NanPairingConfig *pPeerPairingParams)
+{
+    if (pInValue && pPeerPairingParams) {
+        NanFWPairingParamsMatch *pRsp = (NanFWPairingParamsMatch *)pInValue;
+        pPeerPairingParams->enable_pairing_setup =
+                          pRsp->pairing_setup_required;
+        pPeerPairingParams->enable_pairing_cache =
+                          pRsp->npk_nik_caching_required;
+        pPeerPairingParams->supported_bootstrapping_methods =
+                                 pRsp->bootstrapping_method_bitmap;
     }
     return;
 }
@@ -1134,6 +1543,8 @@ int NanCommand::getNdpRequest(struct nlattr **tb_vendor,
                               NanDataPathRequestInd *event)
 {
     u32 len = 0;
+    hal_info *info = getHalInfo(wifiHandle());
+    struct nan_pairing_peer_info *peer = NULL;
 
     if (event == NULL || tb_vendor == NULL) {
         ALOGE("%s: Invalid input argument event:%p tb_vendor:%p",
@@ -1169,11 +1580,28 @@ int NanCommand::getNdpRequest(struct nlattr **tb_vendor,
             mNanCommandInstance->saveServiceId((u8 *)nla_data(tb_vendor[QCA_WLAN_VENDOR_ATTR_NDP_SERVICE_ID]),
                                                event->service_instance_id,
                                                event->ndp_instance_id,
-                                               NAN_ROLE_PUBLISHER);
+                                               NAN_ROLE_PUBLISHER,
+                                               event->peer_disc_mac_addr);
     } else {
         ALOGD("%s: Service ID not present", __FUNCTION__);
     }
 
+    if (info && info->secure_nan) {
+        peer = nan_pairing_get_peer_from_list(info->secure_nan, event->peer_disc_mac_addr);
+        if (peer)
+            peer->ndp_instance_id = event->ndp_instance_id;
+    }
+
+    if (tb_vendor[QCA_WLAN_VENDOR_ATTR_NDP_CSIA_CAPABILITIES]) {
+        event->csia_capabilities =
+              nla_get_u8(tb_vendor[QCA_WLAN_VENDOR_ATTR_NDP_CSIA_CAPABILITIES]);
+        ALOGV("%s: csia capabilities: %d", __FUNCTION__, event->csia_capabilities);
+    }
+
+    if (tb_vendor[QCA_WLAN_VENDOR_ATTR_NDP_GTK_REQUIRED]) {
+        event->gtk_protection = 1;
+        ALOGV("%s: GTK protection enabled", __FUNCTION__);
+    }
     return WIFI_SUCCESS;
 }
 
@@ -1449,4 +1877,34 @@ int NanCommand::getNanRangeReportInd(NanRangeReportInd *event)
         memset(&outputTlv,0, sizeof(outputTlv));
     }
     return WIFI_SUCCESS;
+}
+
+int NanCommand::handleNanBootstrappingReqInd(NanBootstrappingRequestInd  *evt)
+{
+
+    if (mHandler.EventBootstrappingRequest)
+       (*mHandler.EventBootstrappingRequest)(evt);
+    return 0;
+}
+
+int NanCommand::handleNanBootstrappingConfirm(NanBootstrappingConfirmInd *evt)
+{
+    if (mHandler.EventBootstrappingConfirm)
+       (*mHandler.EventBootstrappingConfirm)(evt);
+    return 0;
+}
+
+int NanCommand::handleNanPairingReqInd(NanPairingRequestInd *evt)
+{
+
+    if (mHandler.EventPairingRequest)
+       (*mHandler.EventPairingRequest)(evt);
+    return 0;
+}
+
+int NanCommand::handleNanPairingConfirm(NanPairingConfirmInd *evt)
+{
+    if (mHandler.EventPairingConfirm)
+       (*mHandler.EventPairingConfirm)(evt);
+    return 0;
 }

@@ -80,10 +80,7 @@ wifi_error wifi_set_bssid_blacklist(wifi_request_id id,
     }
 
     for (i = 0; i < params.num_bssid; i++) {
-        ALOGV("BSSID: %d : %02x:%02x:%02x:%02x:%02x:%02x", i,
-                params.bssids[i][0], params.bssids[i][1],
-                params.bssids[i][2], params.bssids[i][3],
-                params.bssids[i][4], params.bssids[i][5]);
+        ALOGV("BSSID: %d : " MACSTR, i, MAC2STR(params.bssids[i]));
     }
 
     roamCommand =
@@ -361,6 +358,8 @@ wifi_error wifi_enable_firmware_roaming(wifi_interface_handle iface, fw_roaming_
         policy = QCA_ROAMING_ALLOWED_WITHIN_ESS;
     } else if(state == ROAMING_DISABLE) {
         policy = QCA_ROAMING_NOT_ALLOWED;
+    } else if(state == ROAMING_AGGRESSIVE) {
+        policy = QCA_ROAMING_MODE_AGGRESSIVE;
     } else {
         ALOGE("%s: Invalid state provided: %d. Exit \n", __FUNCTION__, state);
         return WIFI_ERROR_INVALID_ARGS;

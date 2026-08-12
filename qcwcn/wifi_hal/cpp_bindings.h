@@ -22,7 +22,7 @@
 #ifndef __WIFI_HAL_CPP_BINDINGS_H__
 #define __WIFI_HAL_CPP_BINDINGS_H__
 
-#include "wifi_hal.h"
+#include <hardware_legacy/wifi_hal.h>
 #include "common.h"
 #include "sync.h"
 
@@ -356,6 +356,7 @@ public:
     wifi_error requestEvent(int cmd);
     wifi_error requestVendorEvent(uint32_t id, int subcmd);
     wifi_error requestResponse(WifiRequest& request);
+    int requestResponseWithKernelStatus(WifiRequest& request);
 
 protected:
     wifi_handle wifiHandle() {

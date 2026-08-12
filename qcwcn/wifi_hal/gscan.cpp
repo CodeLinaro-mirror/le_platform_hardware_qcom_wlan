@@ -181,7 +181,7 @@ wifi_error wifi_get_gscan_capabilities(wifi_interface_handle handle,
     hal_info *info = getHalInfo(wifiHandle);
 
     if (!(info->supported_feature_set & WIFI_FEATURE_GSCAN)) {
-        ALOGE("%s: GSCAN is not supported by driver", __FUNCTION__);
+        ALOGV("%s: GSCAN is not supported by driver", __FUNCTION__);
         return WIFI_ERROR_NOT_SUPPORTED;
     }
 
@@ -1645,13 +1645,8 @@ wifi_error GScanCommand:: gscan_get_cached_results(
                         cached_results[i].results[j].ts);
                     ALOGD("%s: SSID  %s ", __FUNCTION__,
                         cached_results[i].results[j].ssid);
-                    ALOGD("%s: BSSID: %02x:%02x:%02x:%02x:%02x:%02x \n",
-                        __FUNCTION__, cached_results[i].results[j].bssid[0],
-                        cached_results[i].results[j].bssid[1],
-                        cached_results[i].results[j].bssid[2],
-                        cached_results[i].results[j].bssid[3],
-                        cached_results[i].results[j].bssid[4],
-                        cached_results[i].results[j].bssid[5]);
+                    ALOGD("%s: BSSID: " MACSTR " \n",
+                        __FUNCTION__, MAC2STR(cached_results[i].results[j].bssid));
                     ALOGD("%s: channel %d ", __FUNCTION__,
                         cached_results[i].results[j].channel);
                     ALOGD("%s: rssi  %d ", __FUNCTION__,

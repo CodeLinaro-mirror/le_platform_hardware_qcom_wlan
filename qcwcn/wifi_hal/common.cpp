@@ -18,11 +18,15 @@
 #include <linux/pkt_sched.h>
 #include <linux-private/linux/fib_rules.h>
 #include <netlink/object-api.h>
+#if __has_include(<netlink-private/types.h>)
 #include <netlink-private/object-api.h>
 #include <netlink-private/types.h>
+#else
+#include <nl-priv-dynamic-core/nl-core.h>
+#endif /* has netlink-private */
 #include <dlfcn.h>
 #include <pthread.h>
-#include "wifi_hal.h"
+#include <hardware_legacy/wifi_hal.h>
 #include "common.h"
 #include <errno.h>
 
@@ -250,7 +254,16 @@ int compareLowiVersion(u16 major, u16 minor, u16 micro)
                       0x100*(minor) + \
                       micro;
 
-    return (memcmp(&currVersion, &lowiVersion, sizeof(u32)));
+    ALOGV("%s: comparing versions - current: 0x%08x, lowi: 0x%08x",
+          __FUNCTION__, currVersion, lowiVersion);
+
+    if (lowiVersion > currVersion) {
+        return 1;
+    } else if (lowiVersion < currVersion) {
+        return -1;
+    } else {
+        return 0;
+    }
 }
 
 /*

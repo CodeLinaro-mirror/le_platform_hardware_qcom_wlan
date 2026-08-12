@@ -15,7 +15,7 @@
  *
  * Changes from Qualcomm Innovation Center are provided under the following license:
  *
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -48,7 +48,7 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "wifi_hal.h"
+#include <hardware_legacy/wifi_hal.h>
 
 #ifndef __WIFI_HAL_COMMON_H__
 #define __WIFI_HAL_COMMON_H__
@@ -88,14 +88,25 @@
 #define DEFAULT_EVENT_CB_SIZE   (64)
 #define NUM_RING_BUFS           5
 #define MAX_NUM_RADAR_HISTORY   64
+#define MAX_NUM_MLO_LINKS       15
 
 #define WIFI_HAL_CTRL_IFACE     "/dev/socket/wifihal/wifihal_ctrlsock"
+
+#ifdef CONFIG_MAC_PRIVACY_LOGGING
+#define MAC2STR(a) (a)[0], (a)[1], (a)[2], (a)[5]
+#define MACSTR "%02x:%02x:%02x:**:**:%02x"
+#else
+#define MAC2STR(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
+#define MACSTR "%02x:%02x:%02x:%02x:%02x:%02x"
+#endif
 
 #define MAC_ADDR_ARRAY(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
 #define MAC_ADDR_STR "%02x:%02x:%02x:%02x:%02x:%02x"
 #ifndef BIT
 #define BIT(x) (1 << (x))
 #endif
+
+#define DEFAULT_NAN_IFACE    "wifi-aware0"
 
 typedef int16_t s16;
 typedef int32_t s32;
@@ -127,6 +138,8 @@ typedef struct {
 typedef struct {
     wifi_gscan_capabilities gscan_capa;
     wifi_roaming_capabilities roaming_capa;
+    int max_mlo_association_link_count;
+    int max_mlo_str_link_count;
 } wifi_capa;
 
 typedef struct {
@@ -143,7 +156,7 @@ enum pkt_log_version {
 
 struct gscan_event_handlers_s;
 struct rssi_monitor_event_handler_s;
-struct cld80211_ctx;
+struct wpa_secure_nan;
 
 struct ctrl_sock {
     int s;
@@ -208,12 +221,16 @@ typedef struct hal_info_s {
     pthread_mutex_t pkt_fate_stats_lock;
     struct rssi_monitor_event_handler_s *rssi_handlers;
     struct radio_event_handler_s *radio_handlers;
+    struct twt_cmd_handler_s *twt_cmd_handler;
     wifi_capa capa;
-    struct cld80211_ctx *cldctx;
+    void *cldctx;
     bool apf_enabled;
     bool support_nan_ext_cmd;
     pkt_log_version  pkt_log_ver;
+    /* Interface combination matrix */
+    wifi_iface_concurrency_matrix iface_comb_matrix;
     qca_wlan_vendor_sar_version sar_version;
+    struct wpa_secure_nan *secure_nan;
 } hal_info;
 
 typedef struct {
@@ -267,6 +284,25 @@ wifi_error wifi_virtual_interface_delete(wifi_handle handle, const char* ifname)
 wifi_error wifi_get_radar_history(wifi_interface_handle handle,
         radar_history_result *resultBuf, int resultBufSize, int *numResults);
 wifi_error wifi_disable_next_cac(wifi_interface_handle handle);
+
+wifi_error wifi_get_supported_radio_combinations_matrix(
+        wifi_handle handle, u32 max_size, u32 *size,
+        wifi_radio_combination_matrix *radio_combination_matrix);
+
+wifi_error wifi_twt_register_events(wifi_interface_handle iface,
+                                    wifi_twt_events events);
+wifi_error wifi_twt_get_capabilities(wifi_interface_handle iface,
+                                     wifi_twt_capabilities* capabilities);
+wifi_error wifi_twt_session_get_stats(wifi_request_id id,
+                                      wifi_interface_handle iface,
+                                      int session_id);
+wifi_error wifi_twt_session_setup(wifi_request_id id,
+                                  wifi_interface_handle iface,
+                                  wifi_twt_request request);
+wifi_error wifi_twt_session_teardown(wifi_request_id id,
+                                     wifi_interface_handle iface,
+                                     int session_id);
+int is_feature_supported(wifi_interface_handle iface_handle, int feature);
 // some common macros
 
 #define min(x, y)       ((x) < (y) ? (x) : (y))

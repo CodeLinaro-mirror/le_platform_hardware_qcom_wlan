@@ -27,7 +27,7 @@
  *
  * Changes from Qualcomm Innovation Center are provided under the following license:
  *
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -62,7 +62,7 @@
 
 #include "sync.h"
 
-#include "wifi_hal.h"
+#include <hardware_legacy/wifi_hal.h>
 #include "common.h"
 #include "cpp_bindings.h"
 #include <errno.h>
@@ -329,6 +329,10 @@ wifi_error wifi_get_ring_data(wifi_interface_handle iface,
     hal_info *info = getHalInfo(wifiHandle);
     int ring_id = 0;
 
+    if (!info) {
+        ALOGE("%s: Interface info is NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
     /* Check Supported logger capability */
     if (!(info->supported_logger_feature_set & LOGGER_RING_BUFFER)) {
         ALOGE("%s: Ring buffer logging feature not supported %x", __FUNCTION__,
@@ -840,6 +844,7 @@ WifiLoggerCommand::WifiLoggerCommand(wifi_handle handle, int id, u32 vendor_id, 
     mWaitforRsp = false;
     mMoreData = false;
     mSupportedSet = NULL;
+    mGetWakeStats = NULL;
 }
 
 WifiLoggerCommand::~WifiLoggerCommand()
@@ -1007,6 +1012,7 @@ wifi_error WifiLoggerCommand::requestEvent()
     wifi_error res = WIFI_SUCCESS;
     struct nl_cb *cb = NULL;
 
+    pthread_mutex_lock(&mInfo->cb_lock);
     cb = nl_cb_alloc(NL_CB_DEFAULT);
     if (!cb) {
         ALOGE("%s: Callback allocation failed",__FUNCTION__);
@@ -1049,6 +1055,7 @@ out:
     nl_cb_put(cb);
     /* Cleanup the mMsg */
     mMsg.destroy();
+    pthread_mutex_unlock(&mInfo->cb_lock);
     return res;
 }
 

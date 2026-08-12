@@ -65,6 +65,7 @@
 #include <dlfcn.h>
 #include <dirent.h>
 #include <string.h>
+#include "includes.h"
 #include "common.h"
 #include "driver_cmd_nl80211_extn.h"
 
@@ -77,9 +78,11 @@ static wpa_driver_oem_cb_table_t oem_cb_array[MAX_OEM_LIBS + 1];
 void wpa_msg_handler(struct wpa_driver_nl80211_data *drv,
 		     char *msg, u32 subcmd)
 {
-	if ((subcmd == QCA_NL80211_VENDOR_SUBCMD_CONFIG_TWT) ||
-	    (subcmd == QCA_NL80211_VENDOR_SUBCMD_OEM_DATA) ||
-	    (subcmd == QCA_NL80211_VENDOR_SUBCMD_LL_STATS_GET)) {
+	if (subcmd == QCA_NL80211_VENDOR_SUBCMD_CONFIG_TWT ||
+	    subcmd == QCA_NL80211_VENDOR_SUBCMD_OEM_DATA ||
+	    subcmd == QCA_NL80211_VENDOR_SUBCMD_SR ||
+	    subcmd == QCA_NL80211_VENDOR_SUBCMD_LL_STATS_GET ||
+	    subcmd == QCA_NL80211_VENDOR_SUBCMD_CONNECTED_CHANNEL_STATS) {
 		wpa_msg(drv->ctx, MSG_INFO, "%s", msg);
 	}
 }

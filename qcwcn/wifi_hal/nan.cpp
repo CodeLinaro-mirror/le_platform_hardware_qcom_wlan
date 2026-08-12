@@ -50,7 +50,8 @@
 
 #include "sync.h"
 
-#include "wifi_hal.h"
+#include "wifihal_list.h"
+#include <hardware_legacy/wifi_hal.h>
 #include "nan_i.h"
 #include "common.h"
 #include "cpp_bindings.h"
@@ -113,6 +114,7 @@ wifi_error nan_enable_request(transaction_id id,
     interface_info *ifaceInfo = getIfaceInfo(iface);
     wifi_handle wifiHandle = getWifiHandle(iface);
     hal_info *info = getHalInfo(wifiHandle);
+    u8 followup_rx_support = 0;
 
     if (info == NULL) {
         ALOGE("%s: Error hal_info NULL", __FUNCTION__);
@@ -139,7 +141,12 @@ wifi_error nan_enable_request(transaction_id id,
     if (ret != WIFI_SUCCESS)
         goto cleanup;
 
-    ret = nanCommand->putNanEnable(id, msg);
+    t_nanCommand = NanCommand::instance(wifiHandle);
+    if (t_nanCommand != NULL) {
+        followup_rx_support = t_nanCommand->getFollowupRxSupport();
+    }
+
+    ret = nanCommand->putNanEnable(id, msg, followup_rx_support);
     if (ret != WIFI_SUCCESS) {
         ALOGE("%s: putNanEnable Error:%d", __FUNCTION__, ret);
         goto cleanup;
@@ -150,9 +157,9 @@ wifi_error nan_enable_request(transaction_id id,
         ALOGE("%s: requestEvent Error:%d", __FUNCTION__, ret);
 
     if (ret == WIFI_SUCCESS) {
-        t_nanCommand = NanCommand::instance(wifiHandle);
         if (t_nanCommand != NULL) {
             t_nanCommand->allocSvcParams();
+            t_nanCommand->setNanEnabled();
         }
     }
 
@@ -211,7 +218,9 @@ wifi_error nan_disable_request(transaction_id id,
         t_nanCommand = NanCommand::instance(wifiHandle);
         if (t_nanCommand != NULL) {
             t_nanCommand->deallocSvcParams();
+            t_nanCommand->setNanDisabled();
         }
+        secure_nan_cache_flush(info);
     }
 
 cleanup:
@@ -226,14 +235,48 @@ wifi_error nan_publish_request(transaction_id id,
 {
     wifi_error ret;
     NanCommand *nanCommand = NULL;
+    NanCommand *t_nanCommand = NULL;
     interface_info *ifaceInfo = getIfaceInfo(iface);
     wifi_handle wifiHandle = getWifiHandle(iface);
     hal_info *info = getHalInfo(wifiHandle);
+    nanGrpKey *grp_keys = NULL;
 
     if (info == NULL) {
         ALOGE("%s: Error hal_info NULL", __FUNCTION__);
         return WIFI_ERROR_UNKNOWN;
     }
+
+    t_nanCommand = NanCommand::instance(wifiHandle);
+    if (t_nanCommand == NULL) {
+        ALOGE("%s: Error NanCommand Instance NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+
+    if (info->secure_nan) {
+
+        memcpy(info->secure_nan->own_addr, t_nanCommand->getNmi(),
+               NAN_MAC_ADDR_LEN);
+
+        info->secure_nan->enable_pairing_setup =
+              msg->nan_pairing_config.enable_pairing_setup;
+
+        info->secure_nan->enable_pairing_cache =
+              msg->nan_pairing_config.enable_pairing_cache;
+
+        info->secure_nan->supported_bootstrap =
+              msg->nan_pairing_config.supported_bootstrapping_methods;
+#ifdef WPA_PASN_LIB
+        if (!msg->cipher_capabilities && msg->nan_pairing_config.enable_pairing_setup)
+            msg->cipher_capabilities = 0x4;
+        if (!info->secure_nan->dev_grp_keys)
+            nan_pairing_derive_grp_keys(info, t_nanCommand->getNmi(),
+                                        msg->cipher_capabilities);
+        grp_keys = info->secure_nan->dev_grp_keys;
+#endif
+    }
+
+    if (msg->nan_pairing_config.enable_pairing_verification)
+        nan_set_nira_request(id, iface, msg->nan_identity_key);
 
     nanCommand = new NanCommand(wifiHandle,
                                 0,
@@ -255,7 +298,7 @@ wifi_error nan_publish_request(transaction_id id,
     if (ret != WIFI_SUCCESS)
         goto cleanup;
 
-    ret = nanCommand->putNanPublish(id, msg);
+    ret = nanCommand->putNanPublish(id, msg, grp_keys);
     if (ret != WIFI_SUCCESS) {
         ALOGE("%s: putNanPublish Error:%d",__FUNCTION__, ret);
         goto cleanup;
@@ -328,14 +371,49 @@ wifi_error nan_subscribe_request(transaction_id id,
 {
     wifi_error ret;
     NanCommand *nanCommand = NULL;
+    NanCommand *t_nanCommand = NULL;
     interface_info *ifaceInfo = getIfaceInfo(iface);
     wifi_handle wifiHandle = getWifiHandle(iface);
     hal_info *info = getHalInfo(wifiHandle);
+    nanGrpKey *grp_keys = NULL;
 
     if (info == NULL) {
         ALOGE("%s: Error hal_info NULL", __FUNCTION__);
         return WIFI_ERROR_UNKNOWN;
     }
+
+    t_nanCommand = NanCommand::instance(wifiHandle);
+    if (t_nanCommand == NULL) {
+        ALOGE("%s: Error NanCommand Instance NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+
+    if (info->secure_nan) {
+
+        memcpy(info->secure_nan->own_addr, t_nanCommand->getNmi(),
+               NAN_MAC_ADDR_LEN);
+
+        info->secure_nan->enable_pairing_setup =
+              msg->nan_pairing_config.enable_pairing_setup;
+
+        info->secure_nan->enable_pairing_cache =
+              msg->nan_pairing_config.enable_pairing_cache;
+
+        info->secure_nan->supported_bootstrap =
+              msg->nan_pairing_config.supported_bootstrapping_methods;
+#ifdef WPA_PASN_LIB
+        if (!msg->cipher_capabilities && msg->nan_pairing_config.enable_pairing_setup)
+            msg->cipher_capabilities = 0x4;
+        if (!info->secure_nan->dev_grp_keys)
+            nan_pairing_derive_grp_keys(info, t_nanCommand->getNmi(),
+                                        msg->cipher_capabilities);
+        grp_keys = info->secure_nan->dev_grp_keys;
+#endif
+    }
+
+
+    if (msg->nan_pairing_config.enable_pairing_verification)
+        nan_set_nira_request(id, iface, msg->nan_identity_key);
 
     nanCommand = new NanCommand(wifiHandle,
                                 0,
@@ -357,7 +435,7 @@ wifi_error nan_subscribe_request(transaction_id id,
     if (ret != WIFI_SUCCESS)
         goto cleanup;
 
-    ret = nanCommand->putNanSubscribe(id, msg);
+    ret = nanCommand->putNanSubscribe(id, msg, grp_keys);
     if (ret != WIFI_SUCCESS) {
         ALOGE("%s: putNanSubscribe Error:%d", __FUNCTION__, ret);
         goto cleanup;
@@ -432,6 +510,272 @@ cleanup:
     return ret;
 }
 
+/* Function to get packet number on multicast group keys from wlan firmware */
+wifi_error nan_group_key_pn_request(transaction_id id,
+                                    wifi_interface_handle iface,
+                                    u32 key_index)
+{
+    wifi_error ret;
+    NanCommand *nanCommand;
+    interface_info *ifaceInfo = getIfaceInfo(iface);
+    wifi_handle wifiHandle = getWifiHandle(iface);
+    hal_info *info = getHalInfo(wifiHandle);
+
+    if (info == NULL) {
+        ALOGE("%s: Error hal_info NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+
+    nanCommand = new NanCommand(wifiHandle,
+                                0,
+                                OUI_QCA,
+                                info->support_nan_ext_cmd?
+                                QCA_NL80211_VENDOR_SUBCMD_NAN_EXT :
+                                QCA_NL80211_VENDOR_SUBCMD_NAN);
+    if (nanCommand == NULL) {
+        ALOGE("%s: Error NanCommand NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+
+    ret = nanCommand->create();
+    if (ret != WIFI_SUCCESS)
+        goto cleanup;
+
+    ret = nanCommand->set_iface_id(ifaceInfo->name);
+    if (ret != WIFI_SUCCESS)
+        goto cleanup;
+
+    ret = nanCommand->putNanGroupKeyPnReq(id, key_index);
+    if (ret != WIFI_SUCCESS) {
+        ALOGE("%s: putNanGroupKeyPnReq Error:%d", __FUNCTION__, ret);
+        goto cleanup;
+    }
+
+    ret = nanCommand->requestEvent();
+    if (ret != WIFI_SUCCESS)
+        ALOGE("%s: requestEvent Error:%d", __FUNCTION__, ret);
+
+cleanup:
+    delete nanCommand;
+    return ret;
+}
+
+/*  Function to send NAN shared key descriptor request to the wifi driver.*/
+wifi_error nan_sharedkey_followup_request(transaction_id id,
+                                     wifi_interface_handle iface,
+                                     NanSharedKeyRequest *msg)
+{
+    wifi_error ret;
+    NanCommand *nanCommand;
+    interface_info *ifaceInfo = getIfaceInfo(iface);
+    wifi_handle wifiHandle = getWifiHandle(iface);
+    hal_info *info = getHalInfo(wifiHandle);
+
+    if (info == NULL) {
+        ALOGE("%s: Error hal_info NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+
+    nanCommand = new NanCommand(wifiHandle,
+                                0,
+                                OUI_QCA,
+                                info->support_nan_ext_cmd?
+                                QCA_NL80211_VENDOR_SUBCMD_NAN_EXT :
+                                QCA_NL80211_VENDOR_SUBCMD_NAN);
+    if (nanCommand == NULL) {
+        ALOGE("%s: Error NanCommand NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+
+    ret = nanCommand->create();
+    if (ret != WIFI_SUCCESS)
+        goto cleanup;
+
+    ret = nanCommand->set_iface_id(ifaceInfo->name);
+    if (ret != WIFI_SUCCESS)
+        goto cleanup;
+
+    ret = nanCommand->putNanSharedKeyDescriptorReq(id, msg);
+    if (ret != WIFI_SUCCESS) {
+        ALOGE("%s: putNanSharedKeyDescriptorReq Error:%d", __FUNCTION__, ret);
+        goto cleanup;
+    }
+
+    ret = nanCommand->requestEvent();
+    if (ret != WIFI_SUCCESS)
+        ALOGE("%s: requestEvent Error:%d", __FUNCTION__, ret);
+
+cleanup:
+    delete nanCommand;
+    return ret;
+}
+
+/*  Function to send NAN bootstrapping request to the wifi driver.*/
+wifi_error nan_bootstrapping_request(transaction_id id,
+                                     wifi_interface_handle iface,
+                                     NanBootstrappingRequest* msg)
+{
+    wifi_error ret;
+    u16 pub_sub_id;
+    NanCommand *nanCommand;
+    NanCommand *t_nanCommand;
+    interface_info *ifaceInfo = getIfaceInfo(iface);
+    wifi_handle wifiHandle = getWifiHandle(iface);
+    hal_info *info = getHalInfo(wifiHandle);
+    struct nan_pairing_peer_info *entry;
+    NanResponseMsg rsp_data;
+
+    if (info == NULL) {
+        ALOGE("%s: Error hal_info NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+    if (info->secure_nan == NULL) {
+        ALOGE("%s: Secure NAN not supported", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+    t_nanCommand = NanCommand::instance(wifiHandle);
+    if (t_nanCommand == NULL) {
+        ALOGE("%s: Error NanCommand NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+
+    pub_sub_id = t_nanCommand->getPubSubId(msg->requestor_instance_id,
+                                           NAN_ROLE_SUBSCRIBER);
+
+    nanCommand = new NanCommand(wifiHandle,
+                                0,
+                                OUI_QCA,
+                                info->support_nan_ext_cmd?
+                                QCA_NL80211_VENDOR_SUBCMD_NAN_EXT :
+                                QCA_NL80211_VENDOR_SUBCMD_NAN);
+    if (nanCommand == NULL) {
+        ALOGE("%s: Error NanCommand NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+
+    ret = nanCommand->create();
+    if (ret != WIFI_SUCCESS)
+        goto cleanup;
+
+    ret = nanCommand->set_iface_id(ifaceInfo->name);
+    if (ret != WIFI_SUCCESS)
+        goto cleanup;
+
+    info->secure_nan->dialog_token++;
+    ret = nanCommand->putNanBootstrappingReq(id, msg, pub_sub_id,
+                                             info->secure_nan->dialog_token);
+    if (ret != WIFI_SUCCESS) {
+        ALOGE("%s: putNanBootstrappingReq Error:%d", __FUNCTION__, ret);
+        goto cleanup;
+    }
+
+    entry = nan_pairing_get_peer_from_list(info->secure_nan, msg->peer_disc_mac_addr);
+    if (entry && entry->is_pairing_in_progress) {
+        ALOGV("%s: pairing in progress", __FUNCTION__);
+        goto cleanup;
+    }
+
+    entry = nan_pairing_add_peer_to_list(info->secure_nan, msg->peer_disc_mac_addr);
+    if (entry) {
+        entry->pub_sub_id = pub_sub_id;
+        entry->requestor_instance_id = msg->requestor_instance_id;
+        info->secure_nan->bootstrapping_id++;
+        entry->dialog_token = info->secure_nan->dialog_token;
+        entry->bootstrapping_instance_id = info->secure_nan->bootstrapping_id;
+        entry->peer_role = SECURE_NAN_BOOTSTRAPPING_RESPONDER;
+    }
+
+    if (msg->request_bootstrapping_method)
+        info->secure_nan->supported_bootstrap = msg->request_bootstrapping_method;
+
+    memset(&rsp_data, 0, sizeof(rsp_data));
+    rsp_data.response_type = NAN_BOOTSTRAPPING_INITIATOR_RESPONSE;
+    rsp_data.status = NAN_STATUS_SUCCESS;
+    rsp_data.body.bootstrapping_request_response.bootstrapping_instance_id =
+                                             info->secure_nan->bootstrapping_id;
+    t_nanCommand->saveNanResponseMsg(id, rsp_data);
+
+    ret = nanCommand->requestEvent();
+    if (ret != WIFI_SUCCESS) {
+        ALOGE("%s: requestEvent Error:%d", __FUNCTION__, ret);
+        nan_pairing_delete_peer_from_list(info->secure_nan, msg->peer_disc_mac_addr);
+    }
+
+cleanup:
+    delete nanCommand;
+    return ret;
+}
+
+/*  Function to send NAN bootstrapping Indication rsp to the wifi driver.*/
+wifi_error nan_bootstrapping_indication_response(transaction_id id,
+                                                 wifi_interface_handle iface,
+                                                 NanBootstrappingIndicationResponse* msg)
+{
+    wifi_error ret;
+    NanCommand *nanCommand;
+    NanCommand *t_nanCommand;
+    interface_info *ifaceInfo = getIfaceInfo(iface);
+    wifi_handle wifiHandle = getWifiHandle(iface);
+    hal_info *info = getHalInfo(wifiHandle);
+    struct nan_pairing_peer_info *entry;
+    NanResponseMsg rsp_data;
+
+    if (info == NULL) {
+        ALOGE("%s: Error hal_info NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+    if (info->secure_nan == NULL) {
+        ALOGE("%s: Secure NAN not supported", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+    t_nanCommand = NanCommand::instance(wifiHandle);
+    if (t_nanCommand == NULL) {
+        ALOGE("%s: Error NanCommand NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+
+    nanCommand = new NanCommand(wifiHandle,
+                                0,
+                                OUI_QCA,
+                                info->support_nan_ext_cmd?
+                                QCA_NL80211_VENDOR_SUBCMD_NAN_EXT :
+                                QCA_NL80211_VENDOR_SUBCMD_NAN);
+    if (nanCommand == NULL) {
+        ALOGE("%s: Error NanCommand NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+
+    ret = nanCommand->create();
+    if (ret != WIFI_SUCCESS)
+        goto cleanup;
+
+    ret = nanCommand->set_iface_id(ifaceInfo->name);
+    if (ret != WIFI_SUCCESS)
+        goto cleanup;
+
+    ret = nanCommand->putNanBootstrappingIndicationRsp(id, msg);
+    if (ret != WIFI_SUCCESS) {
+        ALOGE("%s: putNanBootstrappingIndicationRsp Error:%d", __FUNCTION__, ret);
+        goto cleanup;
+    }
+
+    memset(&rsp_data, 0, sizeof(rsp_data));
+    rsp_data.response_type = NAN_BOOTSTRAPPING_RESPONDER_RESPONSE;
+    rsp_data.status = NAN_STATUS_SUCCESS;
+    rsp_data.body.bootstrapping_request_response.bootstrapping_instance_id =
+                                                      msg->service_instance_id;
+    t_nanCommand->saveNanResponseMsg(id, rsp_data);
+
+    ret = nanCommand->requestEvent();
+    if (ret != WIFI_SUCCESS) {
+        ALOGE("%s: requestEvent Error:%d", __FUNCTION__, ret);
+    }
+
+cleanup:
+    delete nanCommand;
+    return ret;
+}
+
 /*  Function to send NAN follow up request to the wifi driver.*/
 wifi_error nan_transmit_followup_request(transaction_id id,
                                          wifi_interface_handle iface,
@@ -442,6 +786,9 @@ wifi_error nan_transmit_followup_request(transaction_id id,
     interface_info *ifaceInfo = getIfaceInfo(iface);
     wifi_handle wifiHandle = getWifiHandle(iface);
     hal_info *info = getHalInfo(wifiHandle);
+    struct nan_pairing_peer_info *entry;
+    NanSharedKeyRequest key;
+    u16 pub_sub_id = 0;
 
     if (info == NULL) {
         ALOGE("%s: Error hal_info NULL", __FUNCTION__);
@@ -468,10 +815,40 @@ wifi_error nan_transmit_followup_request(transaction_id id,
     if (ret != WIFI_SUCCESS)
         goto cleanup;
 
-    ret = nanCommand->putNanTransmitFollowup(id, msg);
+    key.shared_key_attr_len = 0;
+    if (msg->shared_key_desc_flag) {
+#ifdef WPA_PASN_LIB
+      nan_get_shared_key_descriptor(info, msg->addr, &key);
+#endif
+    }
+    ret = nanCommand->putNanTransmitFollowup(id, msg, &key);
     if (ret != WIFI_SUCCESS) {
         ALOGE("%s: putNanTransmitFollowup Error:%d", __FUNCTION__, ret);
         goto cleanup;
+    }
+
+    if (info->secure_nan) {
+        pub_sub_id = msg->publish_subscribe_id & 0xFF;
+        entry = nan_pairing_get_peer_from_list(info->secure_nan, msg->addr);
+        if (entry) {
+            if (pub_sub_id && entry->pub_sub_id != pub_sub_id) {
+                ALOGI("Update previous pub sub id: %d with new id: %d",
+                      entry->pub_sub_id, pub_sub_id);
+                entry->pub_sub_id = pub_sub_id;
+            }
+            if (msg->requestor_instance_id &&
+                entry->requestor_instance_id != msg->requestor_instance_id) {
+                ALOGI("Update previous requestor instance id: %d with new id: %d",
+                      entry->requestor_instance_id, msg->requestor_instance_id);
+                entry->requestor_instance_id = msg->requestor_instance_id;
+            }
+        } else {
+            entry = nan_pairing_add_peer_to_list(info->secure_nan, msg->addr);
+            if (entry) {
+                entry->pub_sub_id = pub_sub_id;
+                entry->requestor_instance_id = msg->requestor_instance_id;
+            }
+        }
     }
 
     ret = nanCommand->requestEvent();
@@ -973,12 +1350,13 @@ wifi_error nan_data_interface_delete(transaction_id id,
     wifi_error ret;
     struct nlattr *nlData;
     NanCommand *nanCommand = NULL;
+    NanCommand *t_nanCommand = NULL;
     WiFiConfigCommand *wifiConfigCommand;
     wifi_handle handle = getWifiHandle(iface);
     hal_info *info = getHalInfo(handle);
 
-    if (iface_name == NULL) {
-        ALOGE("%s: Invalid Nan Data Interface Name. \n", __FUNCTION__);
+    if (iface_name == NULL || if_nametoindex(iface_name) == 0) {
+        ALOGE("%s: Invalid/Unknown Nan Data Interface Name. \n", __FUNCTION__);
         return WIFI_ERROR_INVALID_ARGS;
     }
 
@@ -988,11 +1366,41 @@ wifi_error nan_data_interface_delete(transaction_id id,
         return WIFI_ERROR_UNKNOWN;
     }
 
+    t_nanCommand = NanCommand::instance(handle);
+    if (t_nanCommand == NULL)
+        ALOGE("%s: Error NanCommand NULL", __FUNCTION__);
+
+    // NL80211_CMD_DEL_INTERFACE internally takes care of NDP cleanup.
+    if ((check_feature(QCA_WLAN_VENDOR_FEATURE_USE_ADD_DEL_VIRTUAL_INTF_FOR_NDI,
+                       &info->driver_supported_features)) &&
+        if_nametoindex(iface_name)) {
+        wifiConfigCommand = new WiFiConfigCommand(handle,
+                                                  get_requestid(), 0, 0);
+        if (wifiConfigCommand == NULL) {
+            ALOGE("%s: Error wifiConfigCommand NULL", __FUNCTION__);
+            return WIFI_ERROR_UNKNOWN;
+        }
+        wifiConfigCommand->create_generic(NL80211_CMD_DEL_INTERFACE);
+        wifiConfigCommand->put_u32(NL80211_ATTR_IFINDEX,
+                                   if_nametoindex(iface_name));
+
+        if (t_nanCommand != NULL)
+            t_nanCommand->saveTransactionId(id);
+
+        /* Send the NL msg. */
+        wifiConfigCommand->waitForRsp(false);
+        if (wifiConfigCommand->requestEvent() != WIFI_SUCCESS) {
+            ALOGE("%s: Delete intf failed", __FUNCTION__);
+        }
+        delete wifiConfigCommand;
+        return WIFI_SUCCESS;
+    }
+
     ret = nan_initialize_vendor_cmd(iface,
                                     &nanCommand);
     if (ret != WIFI_SUCCESS) {
         ALOGE("%s: Initialization failed", __FUNCTION__);
-        goto delete_ndi;
+        return ret;
     }
 
     /* Add the vendor specific attributes for the NL command. */
@@ -1023,28 +1431,6 @@ wifi_error nan_data_interface_delete(transaction_id id,
 
 cleanup:
     delete nanCommand;
-
-delete_ndi:
-    if ((check_feature(QCA_WLAN_VENDOR_FEATURE_USE_ADD_DEL_VIRTUAL_INTF_FOR_NDI,
-                       &info->driver_supported_features)) &&
-        if_nametoindex(iface_name)) {
-        wifiConfigCommand = new WiFiConfigCommand(handle,
-                                                  get_requestid(), 0, 0);
-        if (wifiConfigCommand == NULL) {
-            ALOGE("%s: Error wifiConfigCommand NULL", __FUNCTION__);
-            return WIFI_ERROR_UNKNOWN;
-        }
-        wifiConfigCommand->create_generic(NL80211_CMD_DEL_INTERFACE);
-        wifiConfigCommand->put_u32(NL80211_ATTR_IFINDEX,
-                                   if_nametoindex(iface_name));
-        /* Send the NL msg. */
-        wifiConfigCommand->waitForRsp(false);
-        if (wifiConfigCommand->requestEvent() != WIFI_SUCCESS) {
-            ALOGE("%s: Delete intf failed", __FUNCTION__);
-        }
-        delete wifiConfigCommand;
-    }
-
     return ret;
 }
 
@@ -1210,7 +1596,10 @@ wifi_error nan_data_request_initiator(transaction_id id,
     NanCommand *nanCommand = NULL;
     NanCommand *t_nanCommand = NULL;
     wifi_handle wifiHandle = getWifiHandle(iface);
-
+    hal_info *info = getHalInfo(wifiHandle);
+#ifdef WPA_PASN_LIB
+    struct ptksa_cache_entry *entry = NULL;
+#endif
     if (msg == NULL)
         return WIFI_ERROR_INVALID_ARGS;
 
@@ -1225,12 +1614,35 @@ wifi_error nan_data_request_initiator(transaction_id id,
     if (t_nanCommand == NULL)
         ALOGE("%s: Error NanCommand NULL", __FUNCTION__);
 
+#ifdef WPA_PASN_LIB
+    if (info && info->secure_nan) {
+        struct nan_pairing_peer_info *peer;
+
+        peer = nan_pairing_get_peer_from_list(info->secure_nan,
+                                              msg->peer_disc_mac_addr);
+        entry = ptksa_cache_get(info->secure_nan->ptksa,
+                                msg->peer_disc_mac_addr, WPA_CIPHER_NONE);
+        if (entry && peer && peer->is_paired) {
+            /* Use cipher_type from pairing peer info */
+            msg->cipher_type = peer->cipher_type;
+
+            nan_pasn_kdk_to_ndp_pmk(entry->ptk.kdk, entry->ptk.kdk_len,
+                                    entry->own_addr, entry->addr,
+                                    msg->key_info.body.pmk_info.pmk,
+                                    &msg->key_info.body.pmk_info.pmk_len);
+
+            msg->key_info.key_type = NAN_SECURITY_KEY_INPUT_PMK;
+        }
+    }
+#endif
+
     if ((msg->cipher_type != NAN_CIPHER_SUITE_SHARED_KEY_NONE) &&
         (msg->key_info.body.pmk_info.pmk_len == 0) &&
         (msg->key_info.body.passphrase_info.passphrase_len == 0)) {
         ALOGE("%s: Failed-Initiator req, missing pmk and passphrase",
                __FUNCTION__);
-        return WIFI_ERROR_INVALID_ARGS;
+        ret = WIFI_ERROR_INVALID_ARGS;
+        goto cleanup;
     }
 
     if ((msg->cipher_type != NAN_CIPHER_SUITE_SHARED_KEY_NONE) &&
@@ -1238,7 +1650,8 @@ wifi_error nan_data_request_initiator(transaction_id id,
         (msg->service_name_len == 0)) {
         ALOGE("%s: Failed-Initiator req, missing service name for out of band request",
               __FUNCTION__);
-        return WIFI_ERROR_INVALID_ARGS;
+        ret = WIFI_ERROR_INVALID_ARGS;
+        goto cleanup;
     }
 
     /* Add the vendor specific attributes for the NL command. */
@@ -1303,6 +1716,19 @@ wifi_error nan_data_request_initiator(transaction_id id,
     if (msg->cipher_type != NAN_CIPHER_SUITE_SHARED_KEY_NONE) {
         if (nanCommand->put_u32(QCA_WLAN_VENDOR_ATTR_NDP_CSID,
                 msg->cipher_type)){
+            ret = WIFI_ERROR_UNKNOWN;
+            goto cleanup;
+        }
+    }
+    if (msg->csia_capabilities) {
+        if (nanCommand->put_u8(QCA_WLAN_VENDOR_ATTR_NDP_CSIA_CAPABILITIES,
+                msg->csia_capabilities)) {
+            ret = WIFI_ERROR_UNKNOWN;
+            goto cleanup;
+        }
+    }
+    if (msg->gtk_protection) {
+        if (nanCommand->put_flag(QCA_WLAN_VENDOR_ATTR_NDP_GTK_REQUIRED)) {
             ret = WIFI_ERROR_UNKNOWN;
             goto cleanup;
         }
@@ -1391,6 +1817,11 @@ wifi_error nan_data_indication_response(transaction_id id,
     NanCommand *nanCommand = NULL;
     NanCommand *t_nanCommand = NULL;
     wifi_handle wifiHandle = getWifiHandle(iface);
+    hal_info *info = getHalInfo(wifiHandle);
+#ifdef WPA_PASN_LIB
+    struct ptksa_cache_entry *entry = NULL;
+    struct nan_pairing_peer_info *peer = NULL;
+#endif
 
     if (msg == NULL)
         return WIFI_ERROR_INVALID_ARGS;
@@ -1406,12 +1837,45 @@ wifi_error nan_data_indication_response(transaction_id id,
     if (t_nanCommand == NULL)
         ALOGE("%s: Error NanCommand NULL", __FUNCTION__);
 
+#ifdef WPA_PASN_LIB
+    if (info && info->secure_nan) {
+        if (is_zero_ether_addr(msg->peer_disc_mac_addr)) {
+            peer = nan_pairing_get_peer_from_ndp_id(info->secure_nan,
+                                                    msg->ndp_instance_id);
+            if (peer)
+                memcpy(msg->peer_disc_mac_addr, peer->bssid, NAN_MAC_ADDR_LEN);
+        }
+
+        if (!peer)
+            peer = nan_pairing_get_peer_from_list(info->secure_nan,
+                                                  msg->peer_disc_mac_addr);
+
+        entry = ptksa_cache_get(info->secure_nan->ptksa,
+                                msg->peer_disc_mac_addr, WPA_CIPHER_NONE);
+        if (entry && peer && peer->is_paired) {
+            /* Use cipher_type from pairing peer info */
+            msg->cipher_type = peer->cipher_type;
+
+            nan_pasn_kdk_to_ndp_pmk(entry->ptk.kdk, entry->ptk.kdk_len,
+                                    entry->addr, entry->own_addr,
+                                    msg->key_info.body.pmk_info.pmk,
+                                    &msg->key_info.body.pmk_info.pmk_len);
+
+            msg->key_info.key_type = NAN_SECURITY_KEY_INPUT_PMK;
+        } else {
+            ALOGE("%s: Entry not found in cache for ADDR=" MACSTR,
+                  __FUNCTION__, MAC2STR(msg->peer_disc_mac_addr));
+        }
+    }
+#endif
+
     if ((msg->cipher_type != NAN_CIPHER_SUITE_SHARED_KEY_NONE) &&
         (msg->key_info.body.pmk_info.pmk_len == 0) &&
         (msg->key_info.body.passphrase_info.passphrase_len == 0)) {
         ALOGE("%s: Failed-Initiator req, missing pmk and passphrase",
                __FUNCTION__);
-        return WIFI_ERROR_INVALID_ARGS;
+        ret = WIFI_ERROR_INVALID_ARGS;
+        goto cleanup;
     }
 
     /* Add the vendor specific attributes for the NL command. */
@@ -1462,6 +1926,19 @@ wifi_error nan_data_indication_response(transaction_id id,
     if (msg->cipher_type != NAN_CIPHER_SUITE_SHARED_KEY_NONE) {
         if (nanCommand->put_u32(QCA_WLAN_VENDOR_ATTR_NDP_CSID,
                 msg->cipher_type)){
+            ret = WIFI_ERROR_UNKNOWN;
+            goto cleanup;
+        }
+    }
+    if (msg->csia_capabilities) {
+        if (nanCommand->put_u8(QCA_WLAN_VENDOR_ATTR_NDP_CSIA_CAPABILITIES,
+                msg->csia_capabilities)) {
+            ret = WIFI_ERROR_UNKNOWN;
+            goto cleanup;
+        }
+    }
+    if (msg->gtk_protection) {
+        if (nanCommand->put_flag(QCA_WLAN_VENDOR_ATTR_NDP_GTK_REQUIRED)) {
             ret = WIFI_ERROR_UNKNOWN;
             goto cleanup;
         }
@@ -1591,6 +2068,70 @@ cleanup:
     return ret;
 }
 
+/*  Function to set NIRA attribute to firmware */
+wifi_error nan_set_nira_request(transaction_id id,
+                                wifi_interface_handle iface,
+                                const u8 *nan_identity_key)
+{
+    wifi_error ret;
+    NanNIRARequest msg;
+    struct nanIDkey *nik;
+    NanCommand *nanCommand;
+    interface_info *ifaceInfo = getIfaceInfo(iface);
+    wifi_handle wifiHandle = getWifiHandle(iface);
+    hal_info *info = getHalInfo(wifiHandle);
+
+    if (!info || !info->secure_nan || !info->secure_nan->dev_nik) {
+        ALOGE("%s: Error secure nan info NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+
+    nanCommand = new NanCommand(wifiHandle,
+                                0,
+                                OUI_QCA,
+                                info->support_nan_ext_cmd?
+                                QCA_NL80211_VENDOR_SUBCMD_NAN_EXT :
+                                QCA_NL80211_VENDOR_SUBCMD_NAN);
+    if (nanCommand == NULL) {
+        ALOGE("%s: Error NanCommand NULL", __FUNCTION__);
+        return WIFI_ERROR_UNKNOWN;
+    }
+
+    nik = info->secure_nan->dev_nik;
+
+    memcpy(nik->nik_data, nan_identity_key, NAN_IDENTITY_KEY_LEN);
+    nik->nik_len = NAN_IDENTITY_KEY_LEN;
+    nan_pairing_set_nira(info->secure_nan);
+
+    msg.cipher_version = nik->cipher;
+    msg.nonce_len = nik->nira_nonce_len;
+    msg.tag_len = nik->nira_tag_len;
+    memcpy(msg.nonce, nik->nira_nonce, nik->nira_nonce_len);
+    memcpy(msg.tag, nik->nira_tag, nik->nira_tag_len);
+
+    ret = nanCommand->create();
+    if (ret != WIFI_SUCCESS)
+        goto cleanup;
+
+    ret = nanCommand->set_iface_id(ifaceInfo->name);
+    if (ret != WIFI_SUCCESS)
+        goto cleanup;
+
+    ret = nanCommand->putNanIdentityResolutionParams(id, &msg);
+    if (ret != WIFI_SUCCESS) {
+        ALOGE("%s: putNanIdentityResolutionParams Error:%d",__FUNCTION__, ret);
+        goto cleanup;
+    }
+
+    ret = nanCommand->requestEvent();
+    if (ret != WIFI_SUCCESS)
+        ALOGE("%s: requestEvent Error:%d",__FUNCTION__, ret);
+
+cleanup:
+    delete nanCommand;
+    return ret;
+}
+
 // Implementation related to nan class common functions
 // Constructor
 //Making the constructor private since this class is a singleton
@@ -1598,15 +2139,25 @@ NanCommand::NanCommand(wifi_handle handle, int id, u32 vendor_id, u32 subcmd)
         : WifiVendorCommand(handle, id, vendor_id, subcmd)
 {
     memset(&mHandler, 0,sizeof(mHandler));
+    memset(&mVendorHandler, 0,sizeof(mVendorHandler));
     mNanVendorEvent = NULL;
     mNanDataLen = 0;
     mStaParam = NULL;
     memset(mNmiMac, 0, sizeof(mNmiMac));
+    memset(mClusterAddr, 0, sizeof(mClusterAddr));
     mStorePubParams = NULL;
     mStoreSubParams = NULL;
+    pthread_mutex_init(&mSvcLock, NULL);
     mNanMaxPublishes = 0;
     mNanMaxSubscribes = 0;
-    mNanDiscAddrIndDisabled = false;
+    mConfigDiscoveryIndications = 0;
+    mNanFollowupRxSupport = 0;
+    mNanEnabled = false;
+}
+
+void NanCommand::setNanVendorEventAndDataLen(char *event, int len) {
+    mNanVendorEvent = event;
+    mNanDataLen = len;
 }
 
 NanCommand* NanCommand::instance(wifi_handle handle)
@@ -1656,6 +2207,7 @@ void NanCommand::cleanup()
 
 NanCommand::~NanCommand()
 {
+    pthread_mutex_destroy(&mSvcLock);
     ALOGV("NanCommand %p destroyed", this);
 }
 
@@ -1669,10 +2221,46 @@ void NanCommand::saveNmi(u8 *mac)
     memcpy(mNmiMac, mac, NAN_MAC_ADDR_LEN);
 }
 
+/* Save NAN Cluster address */
+void NanCommand::saveClusterAddr(u8 *mac)
+{
+    memcpy(mClusterAddr, mac, NAN_MAC_ADDR_LEN);
+}
+
 /* Get NAN Management Interface address */
 u8 *NanCommand::getNmi()
 {
     return mNmiMac;
+}
+
+/* Get NAN Cluster address */
+u8 *NanCommand::getClusterAddr()
+{
+    return mClusterAddr;
+}
+
+/* Get NAN Followup Rx support */
+u8 NanCommand::getFollowupRxSupport()
+{
+    return mNanFollowupRxSupport;
+}
+
+/* Set NAN Enabled */
+void NanCommand::setNanEnabled()
+{
+    mNanEnabled = true;
+}
+
+/* Set NAN Disabled */
+void NanCommand::setNanDisabled()
+{
+    mNanEnabled = false;
+}
+
+/* is NAN Enabled */
+bool NanCommand::isNanEnabled()
+{
+    return mNanEnabled;
 }
 
 /*
@@ -1685,7 +2273,7 @@ u8 *NanCommand::getNmi()
  * pool - Subscriber/Publisher entry based on NAN/NDP Indication
  */
 void NanCommand::saveServiceId(u8 *service_id, u16 sub_pub_handle,
-                               u32 instance_id, NanRole pool)
+                               u32 instance_id, NanRole pool, const u8 *addr)
 {
     int i;
 
@@ -1694,10 +2282,13 @@ void NanCommand::saveServiceId(u8 *service_id, u16 sub_pub_handle,
               __FUNCTION__, sub_pub_handle, instance_id);
         return;
     }
+
+    pthread_mutex_lock(&mSvcLock);
+
     switch(pool) {
     case NAN_ROLE_PUBLISHER:
         if ((mStorePubParams == NULL) || !mNanMaxPublishes)
-            return;
+            goto end;
         for (i = 0; i < mNanMaxPublishes; i++) {
             /* In 1:n case there can be multiple publish entries with same
              * publish ID, hence save the new entry if instance ID doesn't match
@@ -1711,18 +2302,20 @@ void NanCommand::saveServiceId(u8 *service_id, u16 sub_pub_handle,
             memcpy(mStorePubParams[i].service_id, service_id, NAN_SVC_ID_SIZE);
             mStorePubParams[i].subscriber_publisher_id = sub_pub_handle;
             mStorePubParams[i].instance_id = instance_id;
+            if (addr)
+                memcpy(mStorePubParams[i].peer_mac, addr, NAN_MAC_ADDR_LEN);
             ALOGV("Added new entry in Publisher pool at index=%d with "
                   "Publish ID=%d and Instance ID=%d", i,
                   mStorePubParams[i].subscriber_publisher_id,
                   mStorePubParams[i].instance_id);
-            return;
+            goto end;
         }
         if (i == mNanMaxPublishes)
             ALOGV("No empty slot found in publisher pool, entry not saved");
     break;
     case NAN_ROLE_SUBSCRIBER:
         if ((mStoreSubParams == NULL) || !mNanMaxSubscribes)
-            return;
+            goto end;
         for (i = 0; i < mNanMaxSubscribes; i++) {
             /* In 1:n case there can be multiple subscribe entries with same
              * subscribe ID, hence save new entry if instance ID doesn't match
@@ -1736,11 +2329,13 @@ void NanCommand::saveServiceId(u8 *service_id, u16 sub_pub_handle,
             memcpy(mStoreSubParams[i].service_id, service_id, NAN_SVC_ID_SIZE);
             mStoreSubParams[i].subscriber_publisher_id = sub_pub_handle;
             mStoreSubParams[i].instance_id = instance_id;
+            if (addr)
+                memcpy(mStoreSubParams[i].peer_mac, addr, NAN_MAC_ADDR_LEN);
             ALOGV("Added new entry in Subscriber pool at index=%d with "
                   "Subscribe ID=%d and Instance ID=%d", i,
                   mStoreSubParams[i].subscriber_publisher_id,
                   mStoreSubParams[i].instance_id);
-            return;
+            goto end;
         }
         if (i == mNanMaxSubscribes)
             ALOGV("No empty slot found in subscriber pool, entry not saved");
@@ -1749,6 +2344,9 @@ void NanCommand::saveServiceId(u8 *service_id, u16 sub_pub_handle,
         ALOGE("Invalid Pool: %d", pool);
     break;
     }
+
+end:
+    pthread_mutex_unlock(&mSvcLock);
 }
 
 /*
@@ -1761,31 +2359,105 @@ void NanCommand::saveServiceId(u8 *service_id, u16 sub_pub_handle,
 u8 *NanCommand::getServiceId(u32 instance_id, NanRole pool)
 {
     int i;
+    u8 *service_id = NULL;
+
+    pthread_mutex_lock(&mSvcLock);
 
     switch(pool) {
     case NAN_ROLE_PUBLISHER:
         if ((mStorePubParams == NULL) || (!instance_id) || !mNanMaxPublishes)
-            return NULL;
+            goto end;
         ALOGV("Getting Service ID from publisher pool for instance ID=%d", instance_id);
         for (i = 0; i < mNanMaxPublishes; i++) {
-            if (mStorePubParams[i].instance_id == instance_id)
-                return mStorePubParams[i].service_id;
+            if (mStorePubParams[i].instance_id == instance_id) {
+                service_id = mStorePubParams[i].service_id;
+                goto end;
+            }
         }
     break;
     case NAN_ROLE_SUBSCRIBER:
         if ((mStoreSubParams == NULL )|| (!instance_id) || !mNanMaxSubscribes)
-            return NULL;
+            goto end;
         ALOGV("Getting Service ID from subscriber pool for instance ID=%d", instance_id);
         for (i = 0; i < mNanMaxSubscribes; i++) {
-            if (mStoreSubParams[i].instance_id == instance_id)
-                return mStoreSubParams[i].service_id;
+            if (mStoreSubParams[i].instance_id == instance_id) {
+                service_id = mStoreSubParams[i].service_id;
+                goto end;
+            }
         }
     break;
     default:
         ALOGE("Invalid Pool: %d", pool);
     break;
     }
-    return NULL;
+
+end:
+    pthread_mutex_unlock(&mSvcLock);
+    return service_id;
+}
+
+u16 NanCommand::getPubSubId(u32 instance_id, NanRole pool)
+{
+    u32 i;
+    u16 id = 0;
+
+    pthread_mutex_lock(&mSvcLock);
+
+    switch(pool) {
+    case NAN_ROLE_PUBLISHER:
+        if ((mStorePubParams == NULL) || (!instance_id) || !mNanMaxPublishes)
+            goto end;
+        ALOGV("Getting PubSub ID from publisher pool for instance ID=%d", instance_id);
+        for (i = 0; i < mNanMaxPublishes; i++) {
+            if (mStorePubParams[i].instance_id == instance_id) {
+                id = mStorePubParams[i].subscriber_publisher_id;
+                goto end;
+            }
+        }
+    break;
+    case NAN_ROLE_SUBSCRIBER:
+        if ((mStoreSubParams == NULL) || (!instance_id) || !mNanMaxSubscribes)
+            goto end;
+        ALOGV("Getting PubSub ID from subscriber pool for instance ID=%d", instance_id);
+        for (i = 0; i < mNanMaxSubscribes; i++) {
+            if (mStoreSubParams[i].instance_id == instance_id) {
+                id = mStoreSubParams[i].subscriber_publisher_id;
+                goto end;
+            }
+        }
+    break;
+    default:
+        ALOGE("Invalid Pool: %d", pool);
+    break;
+    }
+
+end:
+    pthread_mutex_unlock(&mSvcLock);
+    return id;
+}
+
+u32 NanCommand::getNanMatchHandle(u16 requestor_id, u8 *service_id,
+                                  const u8 *peer)
+{
+    int i;
+
+    if (mStoreSubParams == NULL)
+        return 0;
+
+    pthread_mutex_lock(&mSvcLock);
+
+    for (i = 0; i < mNanMaxSubscribes; i++) {
+        if (mStoreSubParams[i].subscriber_publisher_id == requestor_id &&
+            !memcmp(mStoreSubParams[i].service_id, service_id,
+             NAN_SD_ATTR_SERVICE_ID_LEN) &&
+            !memcmp(mStoreSubParams[i].peer_mac, peer, NAN_MAC_ADDR_LEN)) {
+            pthread_mutex_unlock(&mSvcLock);
+            return mStoreSubParams[i].instance_id;
+        }
+    }
+
+    pthread_mutex_unlock(&mSvcLock);
+    return 0;
 }
 
 /*
@@ -1799,10 +2471,12 @@ void NanCommand::deleteServiceId(u16 sub_handle,
 {
     int i;
 
+    pthread_mutex_lock(&mSvcLock);
+
     switch(pool) {
     case NAN_ROLE_PUBLISHER:
         if ((mStorePubParams == NULL) || (!instance_id) || !mNanMaxPublishes)
-            return;
+            goto end;
         for (i = 0; i < mNanMaxPublishes; i++) {
             /* Delete all the entries that has the matching Instance ID */
             if (mStorePubParams[i].instance_id == instance_id) {
@@ -1816,7 +2490,7 @@ void NanCommand::deleteServiceId(u16 sub_handle,
     break;
     case NAN_ROLE_SUBSCRIBER:
         if ((mStoreSubParams == NULL) || (!sub_handle) || !mNanMaxSubscribes)
-            return;
+            goto end;
         for (i = 0; i < mNanMaxSubscribes; i++) {
             /* Delete all the entries that has the matching subscribe ID */
             if (mStoreSubParams[i].subscriber_publisher_id == sub_handle) {
@@ -1832,6 +2506,9 @@ void NanCommand::deleteServiceId(u16 sub_handle,
         ALOGE("Invalid Pool: %d", pool);
     break;
     }
+
+end:
+    pthread_mutex_unlock(&mSvcLock);
 }
 
 /*
@@ -1846,13 +2523,15 @@ void NanCommand::allocSvcParams()
     if (mNanMaxSubscribes < NAN_DEF_PUB_SUB)
         mNanMaxSubscribes = NAN_DEF_PUB_SUB;
 
+    pthread_mutex_lock(&mSvcLock);
+
     if ((mStorePubParams == NULL) && mNanMaxPublishes) {
         mStorePubParams =
         (NanStoreSvcParams *)malloc(mNanMaxPublishes*sizeof(NanStoreSvcParams));
         if (mStorePubParams == NULL) {
             ALOGE("%s: Publish pool malloc failed", __FUNCTION__);
             deallocSvcParams();
-            return;
+            goto end;
         }
         ALOGV("%s: Allocated the Publish pool for max %d entries",
               __FUNCTION__, mNanMaxPublishes);
@@ -1863,11 +2542,14 @@ void NanCommand::allocSvcParams()
         if (mStoreSubParams == NULL) {
             ALOGE("%s: Subscribe pool malloc failed", __FUNCTION__);
             deallocSvcParams();
-            return;
+            goto end;
         }
         ALOGV("%s: Allocated the Subscribe pool for max %d entries",
               __FUNCTION__, mNanMaxSubscribes);
     }
+
+end:
+    pthread_mutex_unlock(&mSvcLock);
 }
 
 /*
@@ -1877,6 +2559,8 @@ void NanCommand::allocSvcParams()
  */
 void NanCommand::reallocSvcParams(NanRole pool)
 {
+    pthread_mutex_lock(&mSvcLock);
+
     switch(pool) {
     case NAN_ROLE_PUBLISHER:
         if ((mStorePubParams != NULL) && mNanMaxPublishes) {
@@ -1886,7 +2570,7 @@ void NanCommand::reallocSvcParams(NanRole pool)
             if (mStorePubParams == NULL) {
                 ALOGE("%s: Publish pool realloc failed", __FUNCTION__);
                 deallocSvcParams();
-                return;
+                goto end;
             }
             ALOGV("%s: Reallocated the Publish pool for max %d entries",
                    __FUNCTION__, mNanMaxPublishes);
@@ -1900,7 +2584,7 @@ void NanCommand::reallocSvcParams(NanRole pool)
             if (mStoreSubParams == NULL) {
                 ALOGE("%s: Subscribe pool realloc failed", __FUNCTION__);
                 deallocSvcParams();
-                return;
+                goto end;
             }
             ALOGV("%s: Reallocated the Subscribe pool for max %d entries",
                   __FUNCTION__, mNanMaxSubscribes);
@@ -1910,6 +2594,9 @@ void NanCommand::reallocSvcParams(NanRole pool)
         ALOGE("Invalid Pool: %d", pool);
     break;
     }
+
+end:
+    pthread_mutex_unlock(&mSvcLock);
 }
 
 /*
@@ -1919,6 +2606,8 @@ void NanCommand::reallocSvcParams(NanRole pool)
  */
 void NanCommand::deallocSvcParams()
 {
+    pthread_mutex_lock(&mSvcLock);
+
     if (mStorePubParams != NULL) {
         free(mStorePubParams);
         mStorePubParams = NULL;
@@ -1929,6 +2618,59 @@ void NanCommand::deallocSvcParams()
         mStoreSubParams = NULL;
         ALOGV("%s: Deallocated Subscribe pool", __FUNCTION__);
     }
+
+    pthread_mutex_unlock(&mSvcLock);
+}
+
+void NanCommand::saveNanResponseMsg(transaction_id id, NanResponseMsg &msg)
+{
+    mNanResponseMsgVec.push_back(std::make_pair(id, msg));
+}
+
+int NanCommand::getNanResponseMsg(transaction_id id, NanResponseMsg *msg)
+{
+    NanResponseMsg *localMsg;
+
+    for (int i = 0; i < mNanResponseMsgVec.size(); i++) {
+         if (mNanResponseMsgVec[i].first == id) {
+             localMsg = &mNanResponseMsgVec[i].second;
+             msg->status = localMsg->status;
+             msg->response_type = localMsg->response_type;
+
+             switch (msg->response_type) {
+             case NAN_BOOTSTRAPPING_INITIATOR_RESPONSE:
+             case NAN_BOOTSTRAPPING_RESPONDER_RESPONSE:
+                 msg->body.bootstrapping_request_response.bootstrapping_instance_id =
+                 localMsg->body.bootstrapping_request_response.bootstrapping_instance_id;
+                 break;
+             default:
+                 ALOGV("%s: Invalid response type: %d", __FUNCTION__, msg->response_type);
+                 break;
+             }
+             mNanResponseMsgVec.erase(mNanResponseMsgVec.begin() + i);
+             return 0;
+         }
+    }
+    return -1;
+}
+
+/* Save NAN transaction ID for ndi delete command */
+void NanCommand::saveTransactionId(transaction_id id)
+{
+    mNdiTransactionId.push(id);
+}
+
+/* Get NAN transaction ID for ndi delete command */
+transaction_id NanCommand::getTransactionId()
+{
+    transaction_id id = 0;
+
+    if (!mNdiTransactionId.empty()) {
+        id = mNdiTransactionId.front();
+        mNdiTransactionId.pop();
+        ALOGV("%s: id =%d", __FUNCTION__, id);
+    }
+    return id;
 }
 
 wifi_error NanCommand::setCallbackHandler(NanCallbackHandler nHandler)
@@ -2049,6 +2791,21 @@ int NanCommand::handleEvent(WifiEvent &event)
     }
     mNanVendorEvent = NULL;
     return NL_SKIP;
+}
+
+void NanCommand::handleNanRx() {
+
+    if (isNanResponse()) {
+        //handleNanResponse will parse the data and call
+        //the response callback handler with the populated
+        //NanResponseMsg
+        handleNanResponse();
+    } else {
+        //handleNanIndication will parse the data and call
+        //the corresponding Indication callback handler
+        //with the corresponding populated Indication event
+        handleNanIndication();
+    }
 }
 
 /*Helper function to Write and Read TLV called in indication as well as request */

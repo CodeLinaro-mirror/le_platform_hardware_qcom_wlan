@@ -72,7 +72,7 @@
 #define PRINTF_FORMAT(a,b)
 #define STRUCT_PACKED
 #endif
-#include "wifi_config.h"
+#include <hardware_legacy/wifi_config.h>
 
 #ifdef __cplusplus
 extern "C"
@@ -80,6 +80,8 @@ extern "C"
 #endif /* __cplusplus */
 
 int check_feature(enum qca_wlan_vendor_features feature, features_info *info);
+
+wifi_error wifi_set_scan_mode_config(wifi_interface_handle iface, bool enable);
 
 class WiFiConfigCommand: public WifiVendorCommand
 {

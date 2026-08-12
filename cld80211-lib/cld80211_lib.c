@@ -42,6 +42,7 @@
 #include <linux/pkt_sched.h>
 #include <unistd.h>
 #include "cld80211_lib.h"
+#include "cld80211_lib_int.h"
 
 #ifndef LE_BUILD
  #include <log/log.h>
@@ -402,7 +403,17 @@ int cld80211_send_recv_msg(void *cldctx, struct nl_msg *nlmsg,
 
 	while (err > 0) {    /* wait for reply */
 		int res = nl_recvmsgs(ctx->sock, cb);
-		if (res) {
+
+		if (res == -NLE_NOMEM) {
+			/* Happens once:
+			 * nl_recvmsgs blocking wait for nl message which
+			 * dropped due to NOMEM error. This ends up to
+			 * block the thread.
+			 */
+			ALOGE("%s: cld80211: nl_recvmsgs NOMEM error",
+			      getprogname());
+			err = -ENOMEM;
+		} else if (res) {
 			ALOGE("%s: cld80211: nl_recvmsgs failed: %d",
 			      getprogname(), res);
 		}
@@ -473,7 +484,7 @@ int cld80211_recv(void *cldctx, int timeout, bool recv_multi_msg,
 }
 
 
-struct cld80211_ctx * cld80211_init(void)
+void *cld80211_init(void)
 {
 	struct cld80211_ctx *ctx;
 
