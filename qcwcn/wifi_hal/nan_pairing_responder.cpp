@@ -48,6 +48,11 @@ extern "C" {
  * for each role. This wrapper functions helps to initialise struct
  * rsn_pmksa_cache which is different for initiator and responder.
  */
+extern wifi_error nan_pairing_handle_auth_failure(hal_info *info,
+                                                  NanCommand *nanCommand,
+                                                  struct nan_pairing_peer_info *entry,
+                                                  NanStatusType reason_code);
+
 struct rsn_pmksa_cache * nan_pairing_responder_pmksa_cache_init(void)
 {
    return pmksa_cache_auth_init(NULL, NULL);
@@ -369,6 +374,13 @@ int nan_pairing_handle_pasn_auth(wifi_handle handle, const u8 *data, size_t len)
 
         entry = nan_pairing_get_peer_from_list(info->secure_nan,
                                                (u8 *)mgmt->sa);
+        if (entry && status_code != 0) {
+            return nan_pairing_handle_auth_failure(info,
+                                                   nanCommand,
+                                                   entry,
+                                                   NAN_STATUS_PROTOCOL_FAILURE);
+        }
+
         if (nan_attr_ie) {
             if (!entry || !entry->is_paired) {
                 ALOGI("PASN Responder: NIRA present, but peer entry not found");
@@ -458,6 +470,14 @@ int nan_pairing_handle_pasn_auth(wifi_handle handle, const u8 *data, size_t len)
             ALOGE("PASN Responder: M3 from different peer");
             return WIFI_SUCCESS;
         }
+
+        if (status_code != 0) {
+            return nan_pairing_handle_auth_failure(info,
+                                                   nanCommand,
+                                                   entry,
+                                                   NAN_STATUS_PROTOCOL_FAILURE);
+        }
+
         pasn = entry->pasn;
         ret = handle_auth_pasn_3(pasn, info->secure_nan->own_addr,
                                  (u8 *)mgmt->sa, mgmt, len);
